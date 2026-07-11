@@ -69,6 +69,16 @@ def load_vggt_predictions(
         "world_points": world_points,
         "confidence": confidence,
     }
+    if "processed_images" in keys:
+        processed_images = np.asarray(data["processed_images"], dtype=np.float32)
+        if processed_images.shape != (views, height, width, 3):
+            raise ValueError("processed_images must have shape [V, H, W, 3]")
+        output["processed_images"] = processed_images
+    if "processed_valid_mask" in keys:
+        processed_valid_mask = np.asarray(data["processed_valid_mask"], dtype=bool)
+        if processed_valid_mask.shape != (views, height, width):
+            raise ValueError("processed_valid_mask must have shape [V, H, W]")
+        output["processed_valid_mask"] = processed_valid_mask
     for key in ("depth", "intrinsics", "extrinsics"):
         if key in keys:
             output[key] = np.asarray(data[key], dtype=np.float32)
@@ -112,7 +122,9 @@ def unproject_depths(
     return world_points
 
 
-def load_images(images_dir: str | Path, *, target_size: tuple[int, int] | None = None) -> np.ndarray:
+def load_images(
+    images_dir: str | Path, *, target_size: tuple[int, int] | None = None
+) -> np.ndarray:
     root = Path(images_dir)
     if not root.exists():
         raise FileNotFoundError(f"Image directory not found: {root}")

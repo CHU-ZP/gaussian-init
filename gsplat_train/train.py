@@ -23,13 +23,13 @@ def main() -> None:
     config = load_config(args.config)
     scene_cfg = config.get("scene", {})
     scene_root = Path(args.scene_root or scene_cfg.get("root", "data/scene_x"))
-    init_path = resolve_scene_path(scene_root, args.init or scene_cfg.get("output_path", "init/fused_gaussians.pt"))
+    init_path = resolve_scene_path(
+        scene_root, args.init or scene_cfg.get("output_path", "init/fused_gaussians.pt")
+    )
 
     scene = load_scene_data(config, scene_root_override=scene_root)
     model = GaussianModel.from_file(init_path)
-    print(
-        f"Loaded {len(scene)} frames and {model.means.shape[0]} Gaussians from {init_path}."
-    )
+    print(f"Loaded {len(scene)} frames and {model.means.shape[0]} Gaussians from {init_path}.")
 
     if args.dry_run:
         return
@@ -42,9 +42,7 @@ def main() -> None:
             "the rasterization loop in gsplat_train/train.py."
         ) from exc
 
-    raise SystemExit(
-        "The concrete gsplat training loop is intentionally left as the Stage 0 integration task."
-    )
+    raise SystemExit("The concrete gsplat training loop is not implemented yet.")
 
 
 if __name__ == "__main__":

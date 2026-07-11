@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import numpy as np
 
+from .pca import decompose_covariance
+
+SH_C0 = 0.28209479177387814
+
 
 def covariance_to_scale_quat(
     covariance: np.ndarray,
     *,
     eigenvalue_epsilon: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    result = estimate_local_pca_from_covariance(covariance, eigenvalue_epsilon=eigenvalue_epsilon)
-    scales = np.sqrt(np.maximum(result[0], eigenvalue_epsilon)).astype(np.float32)
-    quat = rotation_matrix_to_quaternion(result[1])
+    result = decompose_covariance(covariance, eigenvalue_epsilon=eigenvalue_epsilon)
+    scales = result.scales
+    quat = rotation_matrix_to_quaternion(result.basis)
     return scales, quat
 
 
@@ -19,16 +23,18 @@ def estimate_local_pca_from_covariance(
     *,
     eigenvalue_epsilon: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    cov64 = np.asarray(covariance, dtype=np.float64)
-    cov64 = 0.5 * (cov64 + cov64.T)
-    cov64 += np.eye(3, dtype=np.float64) * float(eigenvalue_epsilon)
-    eigenvalues, basis = np.linalg.eigh(cov64)
-    order = np.argsort(eigenvalues)[::-1]
-    eigenvalues = eigenvalues[order]
-    basis = basis[:, order]
-    if np.linalg.det(basis) < 0.0:
-        basis[:, -1] *= -1.0
-    return eigenvalues.astype(np.float32), basis.astype(np.float32)
+    result = decompose_covariance(covariance, eigenvalue_epsilon=eigenvalue_epsilon)
+    return result.eigenvalues, result.basis
+
+
+def rgb_to_sh_dc(rgb: np.ndarray) -> np.ndarray:
+    values = np.asarray(rgb, dtype=np.float32)
+    return ((values - 0.5) / SH_C0).astype(np.float32)
+
+
+def sh_dc_to_rgb(sh_dc: np.ndarray) -> np.ndarray:
+    values = np.asarray(sh_dc, dtype=np.float32)
+    return (values * SH_C0 + 0.5).astype(np.float32)
 
 
 def rotation_matrix_to_quaternion(rotation: np.ndarray) -> np.ndarray:

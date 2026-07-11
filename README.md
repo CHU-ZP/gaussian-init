@@ -1,15 +1,23 @@
-# VGGT PCA gsplat Initialization
+# VGGT LoG-Ellipse gsplat Initialization
 
-This repository separates the pipeline into three responsibilities:
+This repository initializes anisotropic 3D Gaussians from VGGT dense geometry.
+The implemented path is:
 
-1. VGGT provides dense geometry.
-2. The PCA initialization modules generate Gaussian parameters.
-3. gsplat handles optimization and rendering.
+1. VGGT predicts dense scene coordinates and confidence.
+2. Scale-normalized Laplacian-of-Gaussian responses locate signed extrema in
+   joint image/scale space.
+3. A local structure tensor turns every keypoint into an oriented, area-bounded
+   image-space ellipse.
+4. All valid scene coordinates inside that ellipse contribute to a local 3D
+   covariance, represented as the confidence-weighted second moment around the
+   keypoint's fixed 3D center.
+5. Covariance eigendecomposition initializes Gaussian scale and rotation; the
+   keypoint scene coordinate initializes its center and keypoint RGB initializes
+   the degree-zero spherical-harmonic coefficient.
+6. Optional confidence-weighted voxel fusion combines overlapping proposals.
 
-The first usable path implemented here is Stage 2 from the design notes:
-load VGGT-style dense predictions, sample pixels, estimate local 3D PCA
-covariances, optionally fuse proposals, and save an initialization file that a
-gsplat trainer can consume.
+The ellipse covariance reduction uses chunked PyTorch tensor operations. It runs
+on CUDA when available and uses the same implementation on CPU otherwise.
 
 ## Repository Layout
 
@@ -27,17 +35,18 @@ Expected VGGT prediction format:
 
 ```text
 depth:        [V, H, W]          optional when world_points exists
-confidence:  [V, H, W]
-world_points:[V, H, W, 3]
-intrinsics:  [V, 3, 3]
-extrinsics:  [V, 4, 4]
+confidence:   [V, H, W]
+world_points: [V, H, W, 3]
+intrinsics:   [V, 3, 3]
+extrinsics:   [V, 4, 4]
+processed_images: [V, H, W, 3]  optional but emitted by this repository
+processed_valid_mask: [V, H, W] optional; excludes crop/pad batch padding
 ```
 
 ## Quick Start
 
-Create the uv-managed environment. This project standardizes on Python 3.11
-and PyTorch 2.3.1 with CUDA 12.1 wheels because VGGT pins the matching Torch
-stack.
+The environment uses Python 3.11 and PyTorch 2.3.1 CUDA 12.1 wheels because
+VGGT pins the matching Torch stack.
 
 ```bash
 mkdir -p external
@@ -46,7 +55,43 @@ uv sync --extra dev
 uv run python scripts/verify_env.py
 ```
 
-Create a placeholder VGGT prediction for wiring checks:
+### Prepare the real Tanks and Temples Truck scene
+
+The repository includes a wrapper around the official Tanks and Temples Python
+downloader. It downloads only `Truck.zip`, supplies the resource key published
+on the official page, validates the response length, pinned archive MD5, and ZIP
+CRC, safely extracts it, and uniformly selects 12 frames by default:
+
+```bash
+uv run python scripts/prepare_tnt_truck.py --accept-license
+```
+
+The dataset terms must be reviewed at
+<https://www.tanksandtemples.org/license/> before passing `--accept-license`.
+The official download page is <https://www.tanksandtemples.org/download/>.
+
+Prepared files are placed under:
+
+```text
+data/tnt_truck/
+├── images/
+└── dataset_manifest.json
+```
+
+Use more uniformly spaced views or copy instead of symlinking with:
+
+```bash
+uv run python scripts/prepare_tnt_truck.py \
+  --accept-license \
+  --num-images 24 \
+  --copy \
+  --force
+```
+
+The script prints the exact VGGT and initialization commands for the prepared
+scene when it finishes.
+
+Create deterministic plane geometry for a wiring check:
 
 ```bash
 uv run python -m preprocess.run_vggt \
@@ -55,7 +100,7 @@ uv run python -m preprocess.run_vggt \
   --mock-plane
 ```
 
-Run real VGGT on a scene:
+Run real VGGT:
 
 ```bash
 uv run python -m preprocess.run_vggt \
@@ -65,7 +110,7 @@ uv run python -m preprocess.run_vggt \
   --preprocess-mode crop
 ```
 
-On small GPUs, lower the maximum side length:
+On smaller GPUs, reduce the maximum input side:
 
 ```bash
 uv run python -m preprocess.run_vggt \
@@ -76,52 +121,68 @@ uv run python -m preprocess.run_vggt \
   --max-resolution 336
 ```
 
-Build Gaussian initialization:
+Build the Gaussian initialization:
 
 ```bash
 uv run python -m init.build_init \
-  --config configs/v0_uniform.yaml \
+  --config configs/log_ellipse.yaml \
   --scene-root data/scene_x
 ```
 
-The output is written to:
+Outputs are written to:
 
 ```text
+data/scene_x/init/proposals.pt
 data/scene_x/init/fused_gaussians.pt
+data/scene_x/init/debug.ply
 ```
 
-The saved torch dictionary contains:
+The saved Torch dictionary contains:
 
 ```text
 means:       [N, 3]
 scales:      [N, 3]
 quats:       [N, 4]  # w, x, y, z
 opacities:   [N]
-colors:      [N, 3]
+sh_dc:       [N, 3]  # (RGB - 0.5) / 0.28209479177387814
 covariances: [N, 3, 3]
 confidences: [N]
 view_ids:    [N]
-scores:      [N]
+scores:      [N]     # absolute scale-normalized LoG response
 ```
 
-## Development Stages
+## Configuration
 
-- Stage 0: gsplat baseline from random or COLMAP initialization.
-- Stage 1: VGGT dense geometry export and visualization.
-- Stage 2: uniform pixel sampling plus local 3D PCA.
-- Stage 3: salient and hybrid sampling.
-- Stage 4: robust filtering before and after PCA.
-- Stage 5: multi-view covariance fusion.
-- Stage 6: full ablation-ready method.
+`sampling.sigmas` defines the LoD scale space. Extrema are detected jointly
+across adjacent scales and 3x3 image neighborhoods. One geometric guard level
+is generated internally on either side, so every configured sigma is usable.
+`response_threshold` and
+the cross-scale NMS parameters control keypoint density.
 
-## Notes
+The structure tensor determines ellipse orientation and anisotropy.
+`min_ellipse_area`, `max_ellipse_area`, and `max_axis_ratio` bound its support.
+There is no uniform, single-scale gradient, hybrid, or fixed square-patch path.
 
-`preprocess.run_vggt` currently provides a mock geometry path for local smoke
-checks. Replace that entry point with the actual VGGT call when the VGGT code
-and weights are available.
+The `covariance` section controls valid-point coverage, confidence weighting,
+3D distance rejection, compute device, and per-chunk pixel budget. Setting
+`device: auto` selects CUDA when available.
 
-`gsplat_train.train` is intentionally thin for now: it loads the initialization
-file and verifies dependencies, but the concrete gsplat rasterization loop
-should be filled in once the target camera and dataset format is finalized.
+The preprocessing command stores the exact crop/pad/resized RGB tensor and its
+content mask as `processed_images` and `processed_valid_mask`. This keeps LoG
+keypoints and SH colors pixel-aligned with VGGT scene coordinates and prevents
+white padding seams from creating Gaussians. For external prediction files
+without those fields, source images must already have exactly the prediction
+resolution; arbitrary resizing is rejected because it would corrupt the
+correspondence.
 
-See `docs/environment.md` for the full environment policy.
+## Current Boundary
+
+The LoG/ellipse initialization, 3D covariance estimation, Gaussian parameter
+construction, SH DC conversion, and voxel fusion are implemented and tested.
+
+`gsplat_train.train` and `gsplat_train.eval` still only load the resulting
+state. The concrete rasterization, optimization, checkpoint, and rendering
+metric loops remain to be integrated once the target camera/dataset contract is
+fixed.
+
+See `docs/environment.md` for the environment policy.

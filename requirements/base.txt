@@ -3,3 +3,4 @@
 numpy
 Pillow
 PyYAML
+requests>=2.31

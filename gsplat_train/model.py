@@ -16,7 +16,7 @@ def load_gaussian_state(path: str | Path) -> dict:
 class GaussianModel(nn.Module):
     def __init__(self, state: dict) -> None:
         super().__init__()
-        required = {"means", "scales", "quats", "opacities", "colors"}
+        required = {"means", "scales", "quats", "opacities", "sh_dc"}
         missing = sorted(required.difference(state))
         if missing:
             raise ValueError(f"Gaussian state is missing keys: {missing}")
@@ -24,8 +24,10 @@ class GaussianModel(nn.Module):
         self.means = nn.Parameter(state["means"].float())
         self.log_scales = nn.Parameter(torch.log(torch.clamp(state["scales"].float(), min=1.0e-8)))
         self.quats = nn.Parameter(normalize_quaternions(state["quats"].float()))
-        self.opacity_logits = nn.Parameter(logit(torch.clamp(state["opacities"].float(), 1.0e-6, 1.0 - 1.0e-6)))
-        self.colors = nn.Parameter(torch.clamp(state["colors"].float(), 0.0, 1.0))
+        self.opacity_logits = nn.Parameter(
+            logit(torch.clamp(state["opacities"].float(), 1.0e-6, 1.0 - 1.0e-6))
+        )
+        self.sh_dc = nn.Parameter(state["sh_dc"].float())
 
     @classmethod
     def from_file(cls, path: str | Path) -> "GaussianModel":

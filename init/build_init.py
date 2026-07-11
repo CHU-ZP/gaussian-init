@@ -6,9 +6,10 @@ from typing import Any
 
 import numpy as np
 
+from .ellipses import compute_covariances
 from .filters import PCAFilterConfig, valid_pca
 from .fusion import voxel_fuse
-from .gaussian_params import rotation_matrix_to_quaternion
+from .gaussian_params import rgb_to_sh_dc, rotation_matrix_to_quaternion, sh_dc_to_rgb
 from .io import (
     load_config,
     load_images,
@@ -17,9 +18,8 @@ from .io import (
     save_gaussians,
     write_ply,
 )
-from .patch import extract_local_patch
-from .pca import estimate_local_pca
-from .sampling import sample_pixels
+from .pca import decompose_covariance
+from .sampling import detect_multiscale_keypoints
 from .types import GaussianProposals
 
 
@@ -37,7 +37,9 @@ def build_gaussian_initialization(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),
     )
-    proposals_path = resolve_scene_path(scene_root, scene_cfg.get("proposals_path", "init/proposals.pt"))
+    proposals_path = resolve_scene_path(
+        scene_root, scene_cfg.get("proposals_path", "init/proposals.pt")
+    )
     output_path = resolve_scene_path(
         scene_root,
         output_override or scene_cfg.get("output_path", "init/fused_gaussians.pt"),
@@ -47,20 +49,28 @@ def build_gaussian_initialization(
     world_points = predictions["world_points"]
     confidence = predictions["confidence"]
     views, height, width, _ = world_points.shape
-
     images = load_scene_images(
         scene_root,
         scene_cfg.get("images_dir", "images"),
         views=views,
         height=height,
         width=width,
+        processed_images=predictions.get("processed_images"),
+    )
+    image_valid_masks = np.asarray(
+        predictions.get(
+            "processed_valid_mask",
+            np.ones((views, height, width), dtype=bool),
+        ),
+        dtype=bool,
     )
 
     sampling_cfg = config.get("sampling", {})
-    patch_cfg = config.get("patch", {})
+    covariance_cfg = config.get("covariance", {})
     pca_cfg = config.get("pca", {})
     gaussian_cfg = config.get("gaussian", {})
     fusion_cfg = config.get("fusion", {})
+    _reject_removed_config(config)
 
     eigenvalue_epsilon = float(pca_cfg.get("eigenvalue_epsilon", 1.0e-8))
     pca_filter = PCAFilterConfig.from_config(pca_cfg)
@@ -71,7 +81,7 @@ def build_gaussian_initialization(
     covariances: list[np.ndarray] = []
     scales: list[np.ndarray] = []
     quats: list[np.ndarray] = []
-    colors: list[np.ndarray] = []
+    sh_dc: list[np.ndarray] = []
     opacities: list[float] = []
     confidences: list[float] = []
     view_ids: list[int] = []
@@ -81,78 +91,93 @@ def build_gaussian_initialization(
         "views": views,
         "image_height": height,
         "image_width": width,
-        "sampled_pixels": 0,
+        "detected_keypoints": 0,
         "accepted_proposals": 0,
-        "rejected_patch": 0,
+        "rejected_covariance": 0,
         "rejected_pca": 0,
     }
 
     for view in range(views):
-        samples = sample_pixels(
+        keypoints = detect_multiscale_keypoints(
             view_id=view,
             image=images[view],
             confidence=confidence[view],
             world_points=world_points[view],
-            mode=str(sampling_cfg.get("mode", "uniform")),
-            stride=int(sampling_cfg.get("stride", 16)),
-            max_samples=int(sampling_cfg.get("max_samples_per_view", 8000)),
+            sigmas=sampling_cfg.get("sigmas", [1.0, 1.6, 2.5, 4.0, 6.4]),
+            response_threshold=float(sampling_cfg.get("response_threshold", 0.005)),
+            max_keypoints=int(sampling_cfg.get("max_keypoints_per_view", 10000)),
+            min_distance=int(sampling_cfg.get("min_distance", 3)),
+            nms_radius_factor=float(sampling_cfg.get("nms_radius_factor", 3.0)),
+            structure_sigma_factor=float(sampling_cfg.get("structure_sigma_factor", 1.5)),
+            ellipse_radius_factor=float(sampling_cfg.get("ellipse_radius_factor", 2.5)),
+            min_ellipse_area=float(sampling_cfg.get("min_ellipse_area", 12.0)),
+            max_ellipse_area=float(sampling_cfg.get("max_ellipse_area", 800.0)),
+            max_axis_ratio=float(sampling_cfg.get("max_axis_ratio", 8.0)),
             confidence_threshold=confidence_threshold,
-            salient_fraction=float(sampling_cfg.get("salient_fraction", 0.0)),
-            min_distance=int(sampling_cfg.get("min_distance", 4)),
+            image_valid_mask=image_valid_masks[view],
         )
-        stats["sampled_pixels"] += len(samples)
+        stats["detected_keypoints"] += len(keypoints)
+        covariance_results = compute_covariances(
+            world_points[view],
+            confidence[view],
+            keypoints.us,
+            keypoints.vs,
+            keypoints.ellipse_matrices,
+            image_valid_mask=image_valid_masks[view],
+            confidence_threshold=confidence_threshold,
+            min_valid_points=int(covariance_cfg.get("min_valid_points", 8)),
+            min_valid_fraction=float(covariance_cfg.get("min_valid_fraction", 0.6)),
+            max_center_distance=covariance_cfg.get("max_center_distance"),
+            confidence_weighted=bool(covariance_cfg.get("confidence_weighted", True)),
+            device=str(covariance_cfg.get("device", "auto")),
+            pixel_budget=int(covariance_cfg.get("pixel_budget", 2_000_000)),
+        )
+        stats["rejected_covariance"] += int(np.count_nonzero(~covariance_results.valid))
 
-        for u, v, score in zip(samples.us, samples.vs, samples.scores, strict=True):
-            patch = extract_local_patch(
-                world_points[view],
-                confidence[view],
-                u=int(u),
-                v=int(v),
-                radius=int(patch_cfg.get("radius", 3)),
-                min_valid_points=int(patch_cfg.get("min_valid_points", 8)),
-                confidence_threshold=confidence_threshold,
-                max_center_distance=patch_cfg.get("max_center_distance"),
-            )
-            if patch is None:
-                stats["rejected_patch"] += 1
-                continue
-
-            pca_result = estimate_local_pca(
-                patch.points,
+        for index in np.flatnonzero(covariance_results.valid):
+            pca_result = decompose_covariance(
+                covariance_results.covariances[index],
                 eigenvalue_epsilon=eigenvalue_epsilon,
             )
             if not valid_pca(pca_result, pca_filter):
                 stats["rejected_pca"] += 1
                 continue
 
-            means.append(patch.center)
+            u = int(keypoints.us[index])
+            v = int(keypoints.vs[index])
+            means.append(world_points[view, v, u].astype(np.float32))
             covariances.append(pca_result.covariance)
             scales.append(pca_result.scales)
             quats.append(rotation_matrix_to_quaternion(pca_result.basis))
-            colors.append(images[view, int(v), int(u)].astype(np.float32))
+            sh_dc.append(rgb_to_sh_dc(images[view, v, u]))
             opacities.append(opacity)
-            confidences.append(patch.mean_confidence)
+            confidences.append(float(covariance_results.mean_confidences[index]))
             view_ids.append(view)
-            scores.append(float(score))
+            scores.append(float(keypoints.scores[index]))
 
     proposals = GaussianProposals.from_lists(
         means=means,
         covariances=covariances,
         scales=scales,
         quats=quats,
-        colors=colors,
+        sh_dc=sh_dc,
         opacities=opacities,
         confidences=confidences,
         view_ids=view_ids,
         scores=scores,
     )
     stats["accepted_proposals"] = len(proposals)
-
+    if len(proposals) == 0:
+        raise RuntimeError(
+            "No Gaussian proposals survived LoG detection, ellipse coverage, and PCA filtering. "
+            "Check image/prediction alignment and confidence, LoG, and PCA thresholds. "
+            f"Stats: {stats}"
+        )
     save_gaussians(
         proposals_path,
         proposals,
         metadata={
-            "stage": "per_view_proposals",
+            "stage": "per_view_log_ellipse_proposals",
             "source_predictions": str(predictions_path),
             "stats": dict(stats),
         },
@@ -160,13 +185,24 @@ def build_gaussian_initialization(
 
     fusion_enabled = bool(fusion_cfg.get("enabled", False)) and not force_no_fusion
     if fusion_enabled:
+        voxel_size = float(fusion_cfg.get("voxel_size", 0.02))
+        if not np.isfinite(voxel_size) or voxel_size <= 0.0:
+            raise ValueError("fusion.voxel_size must be finite and positive")
+        pre_filter_clusters = len(
+            np.unique(np.floor(proposals.means / voxel_size).astype(np.int64), axis=0)
+        )
         fused = voxel_fuse(
             proposals,
-            voxel_size=float(fusion_cfg.get("voxel_size", 0.02)),
+            voxel_size=voxel_size,
             eigenvalue_epsilon=eigenvalue_epsilon,
+            pca_filter=pca_filter,
         )
+        stats["rejected_fusion_pca"] = pre_filter_clusters - len(fused)
+        if len(fused) == 0:
+            raise RuntimeError("All fused Gaussians failed the configured PCA filters")
     else:
         fused = proposals
+        stats["rejected_fusion_pca"] = 0
 
     stats["fused_gaussians"] = len(fused)
     stats["fusion_enabled"] = fusion_enabled
@@ -174,7 +210,7 @@ def build_gaussian_initialization(
         output_path,
         fused,
         metadata={
-            "stage": "fused_gaussians",
+            "stage": "fused_log_ellipse_gaussians",
             "source_predictions": str(predictions_path),
             "source_proposals": str(proposals_path),
             "stats": dict(stats),
@@ -182,7 +218,7 @@ def build_gaussian_initialization(
     )
 
     debug_ply = output_path.parent / "debug.ply"
-    write_ply(debug_ply, fused.means, fused.colors)
+    write_ply(debug_ply, fused.means, sh_dc_to_rgb(fused.sh_dc))
     stats["proposals_path"] = str(proposals_path)
     stats["output_path"] = str(output_path)
     stats["debug_ply"] = str(debug_ply)
@@ -196,27 +232,50 @@ def load_scene_images(
     views: int,
     height: int,
     width: int,
+    processed_images: np.ndarray | None = None,
 ) -> np.ndarray:
+    if processed_images is not None:
+        images = np.asarray(processed_images, dtype=np.float32)
+        if images.shape != (views, height, width, 3):
+            raise ValueError("processed_images are not aligned with VGGT predictions")
+        return images
+
     image_root = resolve_scene_path(scene_root, images_dir)
-    try:
-        images = load_images(image_root, target_size=(width, height))
-    except FileNotFoundError:
-        return np.full((views, height, width, 3), 0.5, dtype=np.float32)
+    images = load_images(image_root)
 
     if images.shape[0] != views:
         raise ValueError(
             f"Image count ({images.shape[0]}) does not match prediction views ({views})"
         )
+    if images.shape[1:3] != (height, width):
+        raise ValueError(
+            "Scene images are not pixel-aligned with VGGT predictions: "
+            f"images have {images.shape[1:3]}, predictions have {(height, width)}"
+        )
     return images.astype(np.float32)
 
 
+def _reject_removed_config(config: dict[str, Any]) -> None:
+    sampling = config.get("sampling", {})
+    removed_sampling = {"mode", "stride", "salient_fraction"}.intersection(sampling)
+    if removed_sampling:
+        names = ", ".join(sorted(removed_sampling))
+        raise ValueError(f"Removed basic sampling options are not supported: {names}")
+    if "patch" in config:
+        raise ValueError(
+            "The fixed square patch configuration was removed; use covariance settings"
+        )
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build PCA-initialized Gaussian parameters.")
+    parser = argparse.ArgumentParser(description="Build LoG/ellipse PCA Gaussian parameters.")
     parser.add_argument("--config", required=True, help="Path to a YAML config.")
     parser.add_argument("--scene-root", default=None, help="Override scene root from config.")
     parser.add_argument("--predictions", default=None, help="Override predictions npz path.")
     parser.add_argument("--output", default=None, help="Override output torch file.")
-    parser.add_argument("--no-fusion", action="store_true", help="Disable fusion even if config enables it.")
+    parser.add_argument(
+        "--no-fusion", action="store_true", help="Disable fusion even if config enables it."
+    )
     return parser.parse_args()
 
 
@@ -233,7 +292,7 @@ def main() -> None:
     print(
         "Built "
         f"{len(proposals)} per-view proposals and {len(fused)} final Gaussians "
-        f"from {stats['sampled_pixels']} sampled pixels."
+        f"from {stats['detected_keypoints']} multi-scale keypoints."
     )
     print(f"Saved proposals: {stats['proposals_path']}")
     print(f"Saved final init: {stats['output_path']}")

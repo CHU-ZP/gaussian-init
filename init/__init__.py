@@ -1,5 +1,5 @@
 """PCA-based Gaussian initialization."""
 
-from .types import GaussianProposals, PixelSamples
+from .types import EllipseKeypoints, GaussianProposals
 
-__all__ = ["GaussianProposals", "PixelSamples"]
+__all__ = ["EllipseKeypoints", "GaussianProposals"]

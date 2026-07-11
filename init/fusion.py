@@ -4,7 +4,9 @@ from collections import defaultdict
 
 import numpy as np
 
-from .gaussian_params import covariance_to_scale_quat
+from .filters import PCAFilterConfig, valid_pca
+from .gaussian_params import rotation_matrix_to_quaternion
+from .pca import decompose_covariance
 from .types import GaussianProposals
 
 
@@ -12,7 +14,8 @@ def voxel_fuse(
     proposals: GaussianProposals,
     *,
     voxel_size: float,
-    eigenvalue_epsilon: float,
+    eigenvalue_epsilon: float = 0.0,
+    pca_filter: PCAFilterConfig | None = None,
 ) -> GaussianProposals:
     if len(proposals) == 0:
         return proposals
@@ -28,7 +31,7 @@ def voxel_fuse(
     covariances: list[np.ndarray] = []
     scales: list[np.ndarray] = []
     quats: list[np.ndarray] = []
-    colors: list[np.ndarray] = []
+    sh_dc: list[np.ndarray] = []
     opacities: list[float] = []
     confidences: list[float] = []
     view_ids: list[int] = []
@@ -48,16 +51,20 @@ def voxel_fuse(
         covariance = np.sum(second_moments * weights[:, None, None], axis=0)
         covariance = 0.5 * (covariance + covariance.T)
 
-        scale, quat = covariance_to_scale_quat(
+        minimum_eigenvalue = float(np.linalg.eigvalsh(covariance)[0])
+        regularization = max(float(eigenvalue_epsilon) - minimum_eigenvalue, 0.0)
+        pca_result = decompose_covariance(
             covariance.astype(np.float32),
-            eigenvalue_epsilon=eigenvalue_epsilon,
+            eigenvalue_epsilon=regularization,
         )
+        if pca_filter is not None and not valid_pca(pca_result, pca_filter):
+            continue
 
         means.append(mean.astype(np.float32))
-        covariances.append(covariance.astype(np.float32))
-        scales.append(scale)
-        quats.append(quat)
-        colors.append(np.sum(proposals.colors[idx] * weights[:, None], axis=0).astype(np.float32))
+        covariances.append(pca_result.covariance)
+        scales.append(pca_result.scales)
+        quats.append(rotation_matrix_to_quaternion(pca_result.basis))
+        sh_dc.append(np.sum(proposals.sh_dc[idx] * weights[:, None], axis=0).astype(np.float32))
         opacities.append(float(np.sum(proposals.opacities[idx] * weights)))
         confidences.append(float(np.sum(proposals.confidences[idx] * weights)))
         view_ids.append(-1)
@@ -68,7 +75,7 @@ def voxel_fuse(
         covariances=covariances,
         scales=scales,
         quats=quats,
-        colors=colors,
+        sh_dc=sh_dc,
         opacities=opacities,
         confidences=confidences,
         view_ids=view_ids,

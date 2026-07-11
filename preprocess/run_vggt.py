@@ -61,6 +61,8 @@ def create_mock_plane_predictions(images_dir: str | Path, output: str | Path) ->
         world_points=world_points,
         intrinsics=intrinsics,
         extrinsics=extrinsics,
+        processed_images=images.astype(np.float32),
+        processed_valid_mask=np.ones((views, height, width), dtype=bool),
     )
     print(f"Saved mock VGGT predictions: {output_path}")
 
@@ -91,7 +93,16 @@ def run_real_vggt(
 
     print(f"Loading {len(image_paths)} images from {images_dir}")
     images = load_and_preprocess_images([str(path) for path in image_paths], mode=preprocess_mode)
+    processed_valid_mask = build_preprocessed_valid_masks(
+        image_paths,
+        mode=preprocess_mode,
+        expected_shape=tuple(images.shape[-2:]),
+    )
     images = resize_for_memory(images, max_resolution=max_resolution)
+    processed_valid_mask = resize_valid_masks(
+        processed_valid_mask,
+        target_shape=tuple(images.shape[-2:]),
+    )
     images = images.to(device)
     print(f"Preprocessed tensor shape: {tuple(images.shape)}")
 
@@ -167,6 +178,8 @@ def run_real_vggt(
         "preprocess_mode": np.asarray(preprocess_mode),
         "model_id": np.asarray(model_id),
         "world_points_source": np.asarray(world_points_source),
+        "processed_images": np.transpose(to_numpy(images), (0, 2, 3, 1)).astype(np.float32),
+        "processed_valid_mask": processed_valid_mask.cpu().numpy().astype(bool),
     }
     if point_map is not None and point_conf is not None:
         payload["point_map"] = point_map.astype(np.float32)
@@ -219,6 +232,68 @@ def resize_for_memory(images, *, max_resolution: int):
     new_height = max(14, round(height * scale / 14) * 14)
     new_width = max(14, round(width * scale / 14) * 14)
     return F.interpolate(images, size=(new_height, new_width), mode="bilinear", align_corners=False)
+
+
+def build_preprocessed_valid_masks(
+    image_paths: list[Path],
+    *,
+    mode: str,
+    expected_shape: tuple[int, int],
+):
+    """Reproduce VGGT's crop/pad geometry for a content-validity mask."""
+    import torch
+    from PIL import Image
+
+    target_size = 518
+    content_shapes: list[tuple[int, int, int, int]] = []
+    for path in image_paths:
+        with Image.open(path) as image:
+            width, height = image.size
+        if mode == "pad":
+            if width >= height:
+                content_width = target_size
+                content_height = round(height * (target_size / width) / 14) * 14
+            else:
+                content_height = target_size
+                content_width = round(width * (target_size / height) / 14) * 14
+            output_height = output_width = target_size
+        else:
+            content_width = target_size
+            resized_height = round(height * (target_size / width) / 14) * 14
+            content_height = min(resized_height, target_size)
+            output_height = content_height
+            output_width = content_width
+        content_shapes.append((content_height, content_width, output_height, output_width))
+
+    batch_height = max(shape[2] for shape in content_shapes)
+    batch_width = max(shape[3] for shape in content_shapes)
+    masks = torch.zeros((len(content_shapes), batch_height, batch_width), dtype=torch.bool)
+    for index, (content_height, content_width, output_height, output_width) in enumerate(
+        content_shapes
+    ):
+        outer_y = (batch_height - output_height) // 2
+        outer_x = (batch_width - output_width) // 2
+        inner_y = (output_height - content_height) // 2
+        inner_x = (output_width - content_width) // 2
+        y0 = outer_y + inner_y
+        x0 = outer_x + inner_x
+        masks[index, y0 : y0 + content_height, x0 : x0 + content_width] = True
+
+    if tuple(masks.shape[-2:]) != tuple(expected_shape):
+        raise RuntimeError(
+            "Computed VGGT valid mask shape does not match its processed images: "
+            f"{tuple(masks.shape[-2:])} vs {tuple(expected_shape)}"
+        )
+    return masks
+
+
+def resize_valid_masks(valid_masks, *, target_shape: tuple[int, int]):
+    import torch.nn.functional as F
+
+    if tuple(valid_masks.shape[-2:]) == tuple(target_shape):
+        return valid_masks
+    resized = F.interpolate(valid_masks[:, None].float(), size=target_shape, mode="nearest")
+    return resized[:, 0] > 0.5
 
 
 def extrinsics_3x4_to_4x4(extrinsics: np.ndarray) -> np.ndarray:

@@ -21,15 +21,19 @@ class PCAResult:
         return float(self.eigenvalues[0]) / smallest
 
 
-def estimate_local_pca(points: np.ndarray, *, eigenvalue_epsilon: float) -> PCAResult:
-    points64 = np.asarray(points, dtype=np.float64)
-    if points64.ndim != 2 or points64.shape[1] != 3:
-        raise ValueError("points must have shape [N, 3]")
-    if points64.shape[0] < 2:
-        raise ValueError("PCA needs at least two points")
-
-    centered = points64 - np.mean(points64, axis=0, keepdims=True)
-    covariance = (centered.T @ centered) / max(points64.shape[0] - 1, 1)
+def decompose_covariance(
+    covariance: np.ndarray,
+    *,
+    eigenvalue_epsilon: float,
+) -> PCAResult:
+    covariance = np.asarray(covariance, dtype=np.float64)
+    if covariance.shape != (3, 3):
+        raise ValueError("covariance must have shape [3, 3]")
+    if not np.isfinite(covariance).all():
+        raise ValueError("covariance must be finite")
+    if not np.isfinite(eigenvalue_epsilon) or eigenvalue_epsilon < 0.0:
+        raise ValueError("eigenvalue_epsilon must be finite and non-negative")
+    covariance = 0.5 * (covariance + covariance.T)
     covariance += np.eye(3, dtype=np.float64) * float(eigenvalue_epsilon)
 
     eigenvalues, basis = np.linalg.eigh(covariance)
