@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local data and experiment outputs can be large.
+data/*
+!data/.gitkeep
+
+# Third-party source trees live here but are not vendored into this repo.
+external/*
+!external/README.md
+
+# Model/checkpoint artifacts.
+*.pt
+*.pth
+*.ckpt
+*.ply
+*.npz
+
+# Editor/system files.
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,32 @@
+scene:
+  root: data/scene_x
+  images_dir: images
+  predictions_path: vggt/predictions.npz
+  proposals_path: init/proposals.pt
+  output_path: init/fused_gaussians.pt
+
+sampling:
+  mode: hybrid
+  stride: 24
+  max_samples_per_view: 12000
+  confidence_threshold: 0.25
+  salient_fraction: 0.7
+  min_distance: 5
+
+patch:
+  radius: 4
+  min_valid_points: 12
+  max_center_distance: null
+
+pca:
+  eigenvalue_epsilon: 1.0e-8
+  scale_min: 1.0e-5
+  scale_max: 1.0
+  condition_max: 3000.0
+
+gaussian:
+  opacity: 0.1
+
+fusion:
+  enabled: true
+  voxel_size: 0.015

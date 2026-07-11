@@ -1,0 +1,1 @@
+"""VGGT preprocessing entry points."""
