@@ -137,6 +137,20 @@ data/scene_x/init/fused_gaussians.pt
 data/scene_x/init/debug.ply
 ```
 
+View the initialized Gaussian splats interactively in a web browser:
+
+```bash
+uv run python scripts/view_gaussians.py \
+  --input data/scene_x/init/fused_gaussians.pt
+```
+
+Open <http://127.0.0.1:8080> and drag with the mouse to rotate the view. When
+running on a remote server, forward the port from your local machine first:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 user@server
+```
+
 The saved Torch dictionary contains:
 
 ```text

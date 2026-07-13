@@ -15,6 +15,7 @@ dependencies = [
   "requests>=2.31",
   "torch==2.3.1",
   "torchvision==0.18.1",
+  "viser==1.0.30",
   "vggt",
 ]
 
