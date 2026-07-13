@@ -374,7 +374,8 @@ def print_next_steps(output_root: Path, image_count: int) -> None:
         "uv run python -m preprocess.run_vggt "
         f"--images {shell_root}/images "
         f"--output {shell_root}/vggt/predictions.npz "
-        "--device cuda --preprocess-mode crop --max-resolution 336"
+        "--device cuda --preprocess-mode crop --max-resolution 336 "
+        "--head-frames-chunk-size 1"
     )
     print("\nBuild Gaussian initialization:")
     print(

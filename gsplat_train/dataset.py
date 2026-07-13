@@ -14,7 +14,8 @@ class SceneData:
     images: np.ndarray
     image_valid_mask: np.ndarray
     intrinsics: np.ndarray | None
-    extrinsics: np.ndarray | None
+    extrinsics_c2w: np.ndarray | None
+    extrinsics_w2c: np.ndarray | None
 
     def __len__(self) -> int:
         return int(self.images.shape[0])
@@ -53,9 +54,17 @@ def load_scene_data(
         dtype=bool,
     )
 
+    extrinsics_c2w = predictions.get("extrinsics_c2w", predictions.get("extrinsics"))
+    extrinsics_w2c = predictions.get("extrinsics_w2c")
+    if extrinsics_c2w is not None and extrinsics_w2c is None:
+        extrinsics_w2c = np.linalg.inv(extrinsics_c2w).astype(np.float32)
+    elif extrinsics_w2c is not None and extrinsics_c2w is None:
+        extrinsics_c2w = np.linalg.inv(extrinsics_w2c).astype(np.float32)
+
     return SceneData(
         images=images.astype(np.float32),
         image_valid_mask=image_valid_mask,
         intrinsics=predictions.get("intrinsics"),
-        extrinsics=predictions.get("extrinsics"),
+        extrinsics_c2w=extrinsics_c2w,
+        extrinsics_w2c=extrinsics_w2c,
     )

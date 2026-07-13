@@ -53,6 +53,8 @@ def test_build_init_from_multiscale_ellipse_predictions(tmp_path: Path) -> None:
     proposals, fused, stats = build_gaussian_initialization(config)
 
     assert stats["detected_keypoints"] > 0
+    assert stats["confidence_percentile"] == 25.0
+    assert stats["confidence_threshold_value"] == 1.0
     assert len(proposals) > 0
     assert fused is proposals
     assert stats["detected_keypoints"] == (
@@ -100,7 +102,7 @@ def make_config(scene_root: Path) -> dict:
             "sigmas": [1.0, 2.0, 3.0, 4.5, 7.0, 10.0],
             "response_threshold": 0.002,
             "max_keypoints_per_view": 128,
-            "confidence_threshold": 0.1,
+            "confidence_percentile": 25.0,
             "min_distance": 3,
             "nms_radius_factor": 3.0,
             "structure_sigma_factor": 1.5,

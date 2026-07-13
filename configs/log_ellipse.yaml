@@ -9,7 +9,7 @@ sampling:
   sigmas: [1.0, 1.6, 2.5, 4.0, 6.4, 10.0]
   response_threshold: 0.005
   max_keypoints_per_view: 12000
-  confidence_threshold: 0.25
+  confidence_percentile: 25.0
   min_distance: 3
   nms_radius_factor: 3.0
   structure_sigma_factor: 1.5

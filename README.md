@@ -37,8 +37,9 @@ Expected VGGT prediction format:
 depth:        [V, H, W]          optional when world_points exists
 confidence:   [V, H, W]
 world_points: [V, H, W, 3]
-intrinsics:   [V, 3, 3]
-extrinsics:   [V, 4, 4]
+intrinsics:      [V, 3, 3]
+extrinsics_c2w:  [V, 4, 4]
+extrinsics_w2c:  [V, 4, 4]
 processed_images: [V, H, W, 3]  optional but emitted by this repository
 processed_valid_mask: [V, H, W] optional; excludes crop/pad batch padding
 ```
@@ -107,7 +108,8 @@ uv run python -m preprocess.run_vggt \
   --images data/scene_x/images \
   --output data/scene_x/vggt/predictions.npz \
   --device cuda \
-  --preprocess-mode crop
+  --preprocess-mode crop \
+  --head-frames-chunk-size 1
 ```
 
 On smaller GPUs, reduce the maximum input side:
@@ -118,7 +120,8 @@ uv run python -m preprocess.run_vggt \
   --output data/scene_x/vggt/predictions.npz \
   --device cuda \
   --preprocess-mode crop \
-  --max-resolution 336
+  --max-resolution 336 \
+  --head-frames-chunk-size 1
 ```
 
 Build the Gaussian initialization:
@@ -128,6 +131,19 @@ uv run python -m init.build_init \
   --config configs/log_ellipse.yaml \
   --scene-root data/scene_x
 ```
+
+View the dense VGGT geometry, processed RGB images, and predicted cameras before
+initialization:
+
+```bash
+uv run python scripts/view_vggt.py \
+  --input data/scene_x/vggt/predictions.npz
+```
+
+The viewer applies the same content mask and default bottom-25% confidence
+filter as initialization. It keeps every second pixel and caps the browser point
+cloud at 500,000 points by default; use `--stride` and `--max-points` to change
+those display-only limits.
 
 Outputs are written to:
 
@@ -173,6 +189,11 @@ is generated internally on either side, so every configured sigma is usable.
 `response_threshold` and
 the cross-scale NMS parameters control keypoint density.
 
+`sampling.confidence_percentile` removes the requested bottom percentage of
+finite, content-valid VGGT confidence scores. VGGT confidence is an unbounded
+ranking score with a lower bound of one, not a probability, so an absolute
+threshold in `[0, 1]` is not meaningful.
+
 The structure tensor determines ellipse orientation and anisotropy.
 `min_ellipse_area`, `max_ellipse_area`, and `max_axis_ratio` bound its support.
 There is no uniform, single-scale gradient, hybrid, or fixed square-patch path.
@@ -188,6 +209,12 @@ white padding seams from creating Gaussians. For external prediction files
 without those fields, source images must already have exactly the prediction
 resolution; arbitrary resizing is rejected because it would corrupt the
 correspondence.
+
+Only the VGGT aggregator uses CUDA mixed precision. Camera, depth, and point
+heads run in float32, matching VGGT's official forward path. The
+`--head-frames-chunk-size` option limits peak head activation memory and defaults
+to one frame. Prediction files created by the previous mixed-precision-head
+implementation must be regenerated; initialization rejects those stale files.
 
 ## Current Boundary
 

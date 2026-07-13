@@ -79,9 +79,20 @@ def load_vggt_predictions(
         if processed_valid_mask.shape != (views, height, width):
             raise ValueError("processed_valid_mask must have shape [V, H, W]")
         output["processed_valid_mask"] = processed_valid_mask
-    for key in ("depth", "intrinsics", "extrinsics"):
+    for key in ("depth", "intrinsics", "extrinsics", "extrinsics_c2w", "extrinsics_w2c"):
         if key in keys:
             output[key] = np.asarray(data[key], dtype=np.float32)
+    for key in (
+        "model_id",
+        "world_points_source",
+        "aggregator_dtype",
+        "head_dtype",
+        "head_frames_chunk_size",
+        "precision_contract",
+        "confidence_semantics",
+    ):
+        if key in keys:
+            output[key] = np.asarray(data[key])
     return output
 
 

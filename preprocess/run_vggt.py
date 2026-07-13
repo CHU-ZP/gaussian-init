@@ -52,6 +52,8 @@ def create_mock_plane_predictions(images_dir: str | Path, output: str | Path) ->
         world_points[view, ..., 2] = 1.0
         extrinsics[view, 0, 3] = 0.02 * view
 
+    extrinsics_w2c = np.linalg.inv(extrinsics).astype(np.float32)
+
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -61,6 +63,8 @@ def create_mock_plane_predictions(images_dir: str | Path, output: str | Path) ->
         world_points=world_points,
         intrinsics=intrinsics,
         extrinsics=extrinsics,
+        extrinsics_c2w=extrinsics,
+        extrinsics_w2c=extrinsics_w2c,
         processed_images=images.astype(np.float32),
         processed_valid_mask=np.ones((views, height, width), dtype=bool),
     )
@@ -76,6 +80,7 @@ def run_real_vggt(
     preprocess_mode: str,
     max_resolution: int,
     use_point_map: bool,
+    head_frames_chunk_size: int,
 ) -> None:
     import torch
     from vggt.models.vggt import VGGT
@@ -86,6 +91,8 @@ def run_real_vggt(
     image_paths = list_image_paths(images_dir)
     device = resolve_device(device_name)
     dtype = resolve_inference_dtype(device)
+    if head_frames_chunk_size < 1:
+        raise ValueError("--head-frames-chunk-size must be at least one")
 
     print(f"Loading VGGT model: {model_id}")
     model = VGGT.from_pretrained(model_id).to(device)
@@ -107,6 +114,7 @@ def run_real_vggt(
     print(f"Preprocessed tensor shape: {tuple(images.shape)}")
 
     print(f"Running VGGT on {device} with dtype {dtype}")
+    print(f"Running VGGT depth/point heads in float32 with frame chunks of {head_frames_chunk_size}")
     autocast_context = (
         torch.cuda.amp.autocast(dtype=dtype) if device.type == "cuda" else nullcontext()
     )
@@ -114,24 +122,20 @@ def run_real_vggt(
         with autocast_context:
             images_batched = images[None]
             aggregated_tokens_list, patch_start_idx = model.aggregator(images_batched)
-            pose_enc = model.camera_head(aggregated_tokens_list)[-1]
-            depth_tensor, depth_conf_tensor = model.depth_head(
+        pose_enc, depth_tensor, depth_conf_tensor, point_map_tensor, point_conf_tensor = (
+            run_prediction_heads(
+                model,
                 aggregated_tokens_list,
                 images_batched,
                 patch_start_idx,
+                device=device,
+                use_point_map=use_point_map,
+                frames_chunk_size=head_frames_chunk_size,
             )
-            if use_point_map:
-                point_map_tensor, point_conf_tensor = model.point_head(
-                    aggregated_tokens_list,
-                    images_batched,
-                    patch_start_idx,
-                )
-            else:
-                point_map_tensor = None
-                point_conf_tensor = None
+        )
 
     extrinsic, intrinsic = pose_encoding_to_extri_intri(
-        pose_enc,
+        pose_enc.float(),
         images.shape[-2:],
     )
 
@@ -141,6 +145,7 @@ def run_real_vggt(
     point_conf = to_numpy(point_conf_tensor).squeeze(0) if point_conf_tensor is not None else None
     extrinsic_w2c = to_numpy(extrinsic).squeeze(0)
     intrinsic_np = to_numpy(intrinsic).squeeze(0)
+    validate_camera_parameters(extrinsic_w2c, intrinsic_np)
 
     world_points_from_depth = unproject_depth_map_to_point_map(
         depth,
@@ -178,6 +183,11 @@ def run_real_vggt(
         "preprocess_mode": np.asarray(preprocess_mode),
         "model_id": np.asarray(model_id),
         "world_points_source": np.asarray(world_points_source),
+        "aggregator_dtype": np.asarray(str(dtype).removeprefix("torch.")),
+        "head_dtype": np.asarray("float32"),
+        "head_frames_chunk_size": np.asarray(head_frames_chunk_size, dtype=np.int64),
+        "precision_contract": np.asarray("vggt_aggregator_amp_heads_float32_v1"),
+        "confidence_semantics": np.asarray("VGGT expp1 score; higher is better; not a probability"),
         "processed_images": np.transpose(to_numpy(images), (0, 2, 3, 1)).astype(np.float32),
         "processed_valid_mask": processed_valid_mask.cpu().numpy().astype(bool),
     }
@@ -189,6 +199,71 @@ def run_real_vggt(
     print(f"world_points source: {world_points_source}")
     print(f"depth shape: {tuple(depth.squeeze(-1).shape)}")
     print(f"world_points shape: {tuple(world_points.shape)}")
+
+
+def run_prediction_heads(
+    model,
+    aggregated_tokens_list,
+    images_batched,
+    patch_start_idx: int,
+    *,
+    device,
+    use_point_map: bool,
+    frames_chunk_size: int,
+):
+    """Run VGGT prediction heads in float32, matching the official forward path."""
+    import torch
+
+    if frames_chunk_size < 1:
+        raise ValueError("frames_chunk_size must be at least one")
+    head_context = (
+        torch.cuda.amp.autocast(enabled=False) if device.type == "cuda" else nullcontext()
+    )
+    with head_context:
+        pose_enc = model.camera_head(aggregated_tokens_list)[-1]
+        depth_tensor, depth_conf_tensor = model.depth_head(
+            aggregated_tokens_list,
+            images_batched,
+            patch_start_idx,
+            frames_chunk_size=frames_chunk_size,
+        )
+        if use_point_map:
+            point_map_tensor, point_conf_tensor = model.point_head(
+                aggregated_tokens_list,
+                images_batched,
+                patch_start_idx,
+                frames_chunk_size=frames_chunk_size,
+            )
+        else:
+            point_map_tensor = None
+            point_conf_tensor = None
+    return pose_enc, depth_tensor, depth_conf_tensor, point_map_tensor, point_conf_tensor
+
+
+def validate_camera_parameters(extrinsics_w2c: np.ndarray, intrinsics: np.ndarray) -> None:
+    extrinsics = np.asarray(extrinsics_w2c, dtype=np.float64)
+    intrinsics64 = np.asarray(intrinsics, dtype=np.float64)
+    if extrinsics.ndim != 3 or extrinsics.shape[1:] != (3, 4):
+        raise ValueError("VGGT extrinsics must have shape [V, 3, 4]")
+    if intrinsics64.shape != (extrinsics.shape[0], 3, 3):
+        raise ValueError("VGGT intrinsics must have shape [V, 3, 3]")
+    if not np.isfinite(extrinsics).all() or not np.isfinite(intrinsics64).all():
+        raise ValueError("VGGT camera parameters must be finite")
+
+    rotations = extrinsics[:, :3, :3]
+    identity = np.eye(3, dtype=np.float64)
+    orthogonality_error = float(
+        np.max(np.abs(np.swapaxes(rotations, 1, 2) @ rotations - identity))
+    )
+    determinant_error = float(np.max(np.abs(np.linalg.det(rotations) - 1.0)))
+    if orthogonality_error > 1.0e-3 or determinant_error > 1.0e-3:
+        raise ValueError(
+            "VGGT rotations are not valid SO(3) matrices; prediction heads must run in float32 "
+            f"(orthogonality error={orthogonality_error:.3e}, "
+            f"determinant error={determinant_error:.3e})"
+        )
+    if np.any(intrinsics64[:, 0, 0] <= 0.0) or np.any(intrinsics64[:, 1, 1] <= 0.0):
+        raise ValueError("VGGT focal lengths must be positive")
 
 
 def resolve_device(device_name: str):
@@ -331,6 +406,12 @@ def parse_args() -> argparse.Namespace:
         help="Use VGGT point-head world points instead of depth unprojection.",
     )
     parser.add_argument(
+        "--head-frames-chunk-size",
+        type=int,
+        default=1,
+        help="Frames per float32 depth/point-head chunk; lower values use less GPU memory.",
+    )
+    parser.add_argument(
         "--mock-plane",
         action="store_true",
         help="Create deterministic plane geometry for smoke tests instead of running VGGT.",
@@ -352,6 +433,7 @@ def main() -> None:
         preprocess_mode=args.preprocess_mode,
         max_resolution=args.max_resolution,
         use_point_map=args.use_point_map,
+        head_frames_chunk_size=args.head_frames_chunk_size,
     )
 
 

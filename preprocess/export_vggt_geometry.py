@@ -27,9 +27,20 @@ def export_point_cloud(
         points = points[indices]
         confidence = confidence[indices]
 
-    colors = np.repeat(np.clip(confidence[:, None], 0.0, 1.0), 3, axis=1)
+    colors = np.repeat(normalize_confidence(confidence)[:, None], 3, axis=1)
     write_ply(output_path, points, colors)
     print(f"Exported {points.shape[0]} points to {output_path}")
+
+
+def normalize_confidence(confidence: np.ndarray) -> np.ndarray:
+    """Map unbounded VGGT confidence scores to a robust grayscale range."""
+    values = np.asarray(confidence, dtype=np.float32)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("confidence must be a non-empty finite vector")
+    low, high = np.percentile(values, [1.0, 99.0])
+    if high <= low:
+        return np.ones_like(values)
+    return np.clip((values - low) / (high - low), 0.0, 1.0).astype(np.float32)
 
 
 def parse_args() -> argparse.Namespace:
