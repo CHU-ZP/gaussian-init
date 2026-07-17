@@ -1,0 +1,56 @@
+scene:
+  root: data/scene_x
+  images_dir: images
+  predictions_path: vggt/predictions.npz
+  output_path: init/fused_gaussians.pt
+
+training:
+  init_path: init/fused_gaussians.pt
+  output_dir: gsplat
+  model_path: gsplat/final_gaussians.pt
+  eval_output_dir: gsplat/eval
+  device: cuda
+  seed: 42
+  max_steps: 30000
+  test_every: 8
+  max_reprojection_error_px: 0.5
+  sh_degree: 3
+  sh_degree_interval: 1000
+  ssim_weight: 0.2
+  random_background: false
+  log_every: 10
+  checkpoint_every: 1000
+  lr_schedule_steps: 30000
+  means_lr_final_factor: 0.01
+  learning_rates:
+    means: 0.00016
+    scales: 0.005
+    quats: 0.001
+    opacities: 0.05
+    sh0: 0.0025
+    shN: 0.000125
+  densification:
+    enabled: true
+    prune_opa: 0.005
+    grow_grad2d: 0.0002
+    grow_scale3d: 0.01
+    grow_scale2d: 0.05
+    prune_scale3d: 0.1
+    prune_scale2d: 0.15
+    refine_start_iter: 500
+    refine_stop_iter: 15000
+    refine_every: 100
+    reset_every: 3000
+    pause_refine_after_reset: 48
+    absgrad: false
+    revised_opacity: false
+    verbose: true
+
+render:
+  near_plane: 0.01
+  far_plane: 10000000000.0
+  radius_clip: 0.0
+  eps2d: 0.3
+  packed: true
+  antialiased: false
+  background: [0.0, 0.0, 0.0]

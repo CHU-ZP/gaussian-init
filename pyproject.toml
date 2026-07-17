@@ -7,7 +7,7 @@ name = "vggt-pca-gsplat"
 version = "0.1.0"
 description = "VGGT geometry to multichannel Lab LoG-ellipse Gaussian initialization."
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.10,<3.11"
 dependencies = [
   "numpy==1.26.1",
   "Pillow>=9.0",
@@ -24,6 +24,10 @@ dev = [
   "pytest>=7.0",
   "ruff>=0.6",
 ]
+train = [
+  "gsplat==1.5.3+pt23cu121",
+  "setuptools>=68",
+]
 
 [tool.setuptools]
 packages = ["preprocess", "init", "gsplat_train"]
@@ -34,7 +38,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
 
 [tool.uv.sources]
 torch = [
@@ -44,8 +48,14 @@ torchvision = [
   { index = "pytorch-cu121", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 vggt = { path = "external/vggt", editable = true }
+gsplat = { index = "gsplat-pt23cu121" }
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
 url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "gsplat-pt23cu121"
+url = "https://docs.gsplat.studio/whl/pt23cu121"
 explicit = true

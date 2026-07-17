@@ -52,13 +52,13 @@ processed_valid_mask: [V, H, W] optional; excludes crop/pad batch padding
 
 ## Quick Start
 
-The environment uses Python 3.11 and PyTorch 2.3.1 CUDA 12.1 wheels because
-VGGT pins the matching Torch stack.
+The environment uses Python 3.10 and PyTorch 2.3.1 CUDA 12.1 wheels so VGGT and
+the official precompiled gsplat wheel share one pinned stack.
 
 ```bash
 mkdir -p external
 test -d external/vggt || git clone https://github.com/facebookresearch/vggt.git external/vggt
-uv sync --extra dev
+uv sync --extra dev --extra train
 uv run python scripts/verify_env.py
 ```
 
@@ -319,15 +319,87 @@ heads run in float32, matching VGGT's official forward path. The
 to one frame. Initialization requires prediction files carrying the matching
 float32-head precision contract.
 
-## Current Boundary
+## gsplat Optimization
 
-The LoG/ellipse initialization, 3D covariance estimation, Gaussian parameter
-construction, SH DC conversion, and similarity-graph fusion are implemented
-and tested.
+The training path consumes the activated initialization format and converts it
+to gsplat's raw trainable convention: log-scales, opacity logits, wxyz
+quaternions, `[N, 1, 3]` SH DC coefficients, and zero-initialized higher SH
+bands. It validates the VGGT world-point/camera projection before rendering.
 
-`gsplat_train.train` and `gsplat_train.eval` still only load the resulting
-state. The concrete rasterization, optimization, checkpoint, and rendering
-metric loops remain to be integrated once the target camera/dataset contract is
-fixed.
+Install the training environment:
+
+```bash
+uv sync --extra dev --extra train
+```
+
+Render the initialization on one held-out view before optimizing:
+
+```bash
+uv run python -m gsplat_train.eval \
+  --config configs/gsplat_train.yaml \
+  --scene-root data/tnt_truck_48 \
+  --model init/fused_gaussians.pt \
+  --split test \
+  --max-views 1 \
+  --output gsplat/init_eval
+```
+
+Run a short fixed-topology optimization smoke test:
+
+```bash
+uv run python -m gsplat_train.train \
+  --config configs/gsplat_train.yaml \
+  --scene-root data/tnt_truck_48 \
+  --max-steps 500 \
+  --disable-densification \
+  --output-dir gsplat/fixed_smoke
+```
+
+Run the configured 30,000-step optimization with `DefaultStrategy`
+densification and pruning:
+
+```bash
+uv run python -m gsplat_train.train \
+  --config configs/gsplat_train.yaml \
+  --scene-root data/tnt_truck_48
+```
+
+Resume from a scene-relative checkpoint while increasing the total target
+step count if needed:
+
+```bash
+uv run python -m gsplat_train.train \
+  --config configs/gsplat_train.yaml \
+  --scene-root data/tnt_truck_48 \
+  --resume gsplat/checkpoints/step_006999.pt \
+  --max-steps 30000
+```
+
+Evaluate the final model and save target/render/error/alpha images plus JSON
+metrics:
+
+```bash
+uv run python -m gsplat_train.eval \
+  --config configs/gsplat_train.yaml \
+  --scene-root data/tnt_truck_48 \
+  --split test
+```
+
+The final `gsplat/final_gaussians.pt` export contains activated scales and
+opacities plus covariances reconstructed from the optimized scale/quaternion,
+so the existing Viser viewer can open it directly:
+
+```bash
+uv run python scripts/view_gaussians.py \
+  --input data/tnt_truck_48/gsplat/final_gaussians.pt
+```
+
+Training uses deterministic every-eighth-view holdout by default, masked
+L1+SSIM loss, progressive SH degree, a scene-scale-adjusted position learning
+rate, checkpoint/resume including optimizer and densification state, and a
+viewer-compatible final export. Initialization and training settings remain in
+separate config files: `configs/log_ellipse.yaml` and
+`configs/gsplat_train.yaml`. The adapter also compensates the pinned gsplat
+1.5.3 opacity-reset precedence bug without modifying the installed package.
 
 See `docs/environment.md` for the environment policy.

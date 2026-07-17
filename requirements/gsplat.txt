@@ -1,3 +1,0 @@
-# Install this only after the Torch/CUDA stack is working.
-# gsplat builds CUDA extensions, so it must match the active torch environment.
-gsplat
