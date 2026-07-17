@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from init.continuity import global_scene_step_scale
 from init.ellipses import compute_covariances, ellipse_mask
 from init.gaussian_params import (
     rgb_to_sh_dc,
@@ -9,7 +10,7 @@ from init.gaussian_params import (
     scale_quat_to_covariance,
     sh_dc_to_rgb,
 )
-from init.fusion import voxel_fuse
+from init.fusion import FusionConfig, similarity_graph_fuse
 from init.filters import PCAFilterConfig
 from init.pca import decompose_covariance
 from init.types import GaussianProposals
@@ -47,7 +48,8 @@ def test_ellipse_covariance_matches_numpy_and_ignores_bounding_box_corners() -> 
         confidence_threshold=0.2,
         min_valid_points=8,
         min_valid_fraction=1.0,
-        max_center_distance=None,
+        continuity_neighbors=8,
+        continuity_ratio_max=4.0,
         confidence_weighted=False,
         device="cpu",
         pixel_budget=10000,
@@ -73,7 +75,8 @@ def test_covariance_rejects_clipped_support_and_invalid_ellipse() -> None:
         confidence_threshold=0.2,
         min_valid_points=2,
         min_valid_fraction=0.75,
-        max_center_distance=None,
+        continuity_neighbors=8,
+        continuity_ratio_max=4.0,
         confidence_weighted=False,
         device="cpu",
         pixel_budget=10000,
@@ -92,11 +95,103 @@ def test_covariance_rejects_clipped_support_and_invalid_ellipse() -> None:
             confidence_threshold=0.2,
             min_valid_points=2,
             min_valid_fraction=0.5,
-            max_center_distance=None,
+            continuity_neighbors=8,
+            continuity_ratio_max=4.0,
             confidence_weighted=False,
             device="cpu",
             pixel_budget=10000,
         )
+
+
+def test_covariance_keeps_only_center_connected_globally_bounded_surface() -> None:
+    height = width = 13
+    yy, xx = np.mgrid[:height, :width]
+    points = np.stack([0.2 * xx, 0.2 * yy, np.zeros_like(xx)], axis=-1).astype(np.float32)
+    points[:, 7:, 2] = 20.0
+    confidence = np.ones((height, width), dtype=np.float32)
+    ellipse = np.asarray([[[36.0, 0.0], [0.0, 36.0]]], dtype=np.float32)
+    support = ellipse_mask((height, width), u=6, v=6, ellipse_matrix=ellipse[0])
+    expected_mask = support & (xx < 7)
+
+    kwargs = {
+        "confidence_threshold": 0.0,
+        "min_valid_points": 2,
+        "min_valid_fraction": 0.0,
+        "continuity_neighbors": 8,
+        "continuity_ratio_max": 4.0,
+        "confidence_weighted": False,
+        "device": "cpu",
+        "pixel_budget": 10000,
+    }
+    results = compute_covariances(
+        points,
+        confidence,
+        np.asarray([6]),
+        np.asarray([6]),
+        ellipse,
+        **kwargs,
+    )
+    deltas = points[expected_mask] - points[6, 6]
+    expected = deltas.T @ deltas / deltas.shape[0]
+    assert results.valid.tolist() == [True]
+    assert results.valid_counts.tolist() == [int(expected_mask.sum())]
+    assert np.allclose(results.covariances[0], expected, atol=1.0e-6)
+    assert np.isclose(results.continuity_reference_scale, 0.2, atol=1.0e-6)
+
+    scaled = compute_covariances(
+        points * 37.0,
+        confidence,
+        np.asarray([6]),
+        np.asarray([6]),
+        ellipse,
+        **kwargs,
+    )
+    assert scaled.valid_counts.tolist() == results.valid_counts.tolist()
+    assert np.allclose(scaled.covariances[0], results.covariances[0] * 37.0**2, atol=2.0e-4)
+    assert np.isclose(
+        scaled.continuity_reference_scale,
+        37.0 * results.continuity_reference_scale,
+        atol=1.0e-5,
+    )
+
+
+def test_global_step_limit_rejects_locally_inflated_depth_bridge() -> None:
+    height = width = 9
+    yy, xx = np.mgrid[:height, :width]
+    points = np.stack([0.2 * xx, 0.2 * yy, np.zeros_like(xx)], axis=-1).astype(np.float32)
+    points[:, 4, 2] = 20.0
+    confidence = np.ones((height, width), dtype=np.float32)
+    ellipse = np.asarray([[[16.0, 0.0], [0.0, 16.0]]], dtype=np.float32)
+    support = ellipse_mask((height, width), u=3, v=4, ellipse_matrix=ellipse[0])
+    expected_mask = support & (xx < 4)
+
+    reference = global_scene_step_scale(
+        points,
+        np.ones((height, width), dtype=bool),
+        neighbors=8,
+    )
+    assert np.isclose(reference, 0.2, atol=1.0e-6)
+
+    results = compute_covariances(
+        points,
+        confidence,
+        np.asarray([3]),
+        np.asarray([4]),
+        ellipse,
+        confidence_threshold=0.0,
+        min_valid_points=2,
+        min_valid_fraction=0.0,
+        continuity_neighbors=8,
+        continuity_ratio_max=3.0,
+        confidence_weighted=False,
+        device="cpu",
+        pixel_budget=10000,
+    )
+    deltas = points[expected_mask] - points[4, 3]
+    expected = deltas.T @ deltas / deltas.shape[0]
+    assert results.valid.tolist() == [True]
+    assert results.valid_counts.tolist() == [int(expected_mask.sum())]
+    assert np.allclose(results.covariances[0], expected, atol=1.0e-6)
 
 
 def test_covariance_scale_quaternion_and_sh_round_trip() -> None:
@@ -138,12 +233,19 @@ def test_single_proposal_fusion_does_not_add_regularization_twice() -> None:
         view_ids=[0],
         scores=[1.0],
     )
-    fused = voxel_fuse(proposal, voxel_size=0.1, eigenvalue_epsilon=1.0e-8)
+    result = similarity_graph_fuse(
+        proposal,
+        config=FusionConfig(voxel_size=0.1),
+        eigenvalue_epsilon=1.0e-8,
+    )
+    fused = result.gaussians
     assert np.allclose(fused.covariances, proposal.covariances, atol=1.0e-12)
     assert np.allclose(fused.sh_dc, proposal.sh_dc)
+    assert result.stats.candidate_pairs == 0
+    assert result.stats.singleton_components == 1
 
 
-def test_fusion_reapplies_scale_filter_after_center_spread() -> None:
+def test_fusion_falls_back_when_merged_component_fails_pca() -> None:
     covariance = np.diag(np.asarray([0.01, 0.01, 0.01], dtype=np.float32))
     pca = decompose_covariance(covariance, eigenvalue_epsilon=0.0)
     proposals = GaussianProposals.from_lists(
@@ -163,9 +265,108 @@ def test_fusion_reapplies_scale_filter_after_center_spread() -> None:
         view_ids=[0, 1],
         scores=[1.0, 1.0],
     )
-    fused = voxel_fuse(
+    result = similarity_graph_fuse(
         proposals,
-        voxel_size=4.0,
+        config=FusionConfig(voxel_size=4.0),
         pca_filter=PCAFilterConfig(scale_min=1.0e-5, scale_max=1.0, condition_max=1.0e8),
     )
-    assert len(fused) == 0
+    assert len(result.gaussians) == 2
+    assert np.allclose(result.gaussians.means, proposals.means)
+    assert result.stats.compatible_pairs == 1
+    assert result.stats.merged_components == 0
+    assert result.stats.fallback_components == 1
+
+
+def test_similarity_graph_fuses_compatible_pair() -> None:
+    proposals = _fusion_proposals(
+        means=[[0.010, 0.0, 0.0], [0.012, 0.0, 0.0]],
+        covariances=[
+            np.diag([0.04, 0.01, 0.0025]),
+            np.diag([0.04, 0.01, 0.0025]),
+        ],
+    )
+    result = similarity_graph_fuse(proposals, config=FusionConfig(voxel_size=0.1))
+
+    assert len(result.gaussians) == 1
+    assert result.gaussians.view_ids.tolist() == [-1]
+    assert result.stats.candidate_pairs == 1
+    assert result.stats.compatible_pairs == 1
+    assert result.stats.merged_components == 1
+
+
+def test_similarity_graph_rejects_incompatible_normal() -> None:
+    proposals = _fusion_proposals(
+        means=[[0.010, 0.0, 0.0], [0.011, 0.0, 0.0]],
+        covariances=[
+            np.diag([0.0001, 0.01, 0.04]),
+            np.diag([0.04, 0.01, 0.0001]),
+        ],
+    )
+    result = similarity_graph_fuse(proposals, config=FusionConfig(voxel_size=0.1))
+
+    assert len(result.gaussians) == 2
+    assert result.stats.compatible_pairs == 0
+    assert result.stats.pairs_failing_normal == 1
+
+
+def test_similarity_graph_rejects_incompatible_color() -> None:
+    proposals = _fusion_proposals(
+        means=[[0.010, 0.0, 0.0], [0.011, 0.0, 0.0]],
+        covariances=[np.eye(3) * 0.001, np.eye(3) * 0.001],
+        colors=[[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+    result = similarity_graph_fuse(proposals, config=FusionConfig(voxel_size=0.1))
+
+    assert len(result.gaussians) == 2
+    assert result.stats.compatible_pairs == 0
+    assert result.stats.pairs_failing_color == 1
+
+
+def test_similarity_graph_rejects_insufficient_overlap() -> None:
+    proposals = _fusion_proposals(
+        means=[[0.001, 0.0, 0.0], [0.091, 0.0, 0.0]],
+        covariances=[np.eye(3) * 1.0e-6, np.eye(3) * 1.0e-6],
+    )
+    result = similarity_graph_fuse(proposals, config=FusionConfig(voxel_size=0.1))
+
+    assert len(result.gaussians) == 2
+    assert result.stats.compatible_pairs == 0
+    assert result.stats.pairs_failing_overlap == 1
+
+
+def test_similarity_graph_uses_connected_components() -> None:
+    proposals = _fusion_proposals(
+        means=[[0.001, 0.0, 0.0], [0.046, 0.0, 0.0], [0.091, 0.0, 0.0]],
+        covariances=[np.eye(3) * 1.0e-6] * 3,
+    )
+    result = similarity_graph_fuse(proposals, config=FusionConfig(voxel_size=0.1))
+
+    assert len(result.gaussians) == 1
+    assert result.stats.candidate_pairs == 3
+    assert result.stats.compatible_pairs == 2
+    assert result.stats.components == 1
+
+
+def _fusion_proposals(
+    *,
+    means: list[list[float]],
+    covariances: list[np.ndarray],
+    colors: list[list[float]] | None = None,
+) -> GaussianProposals:
+    pca_results = [
+        decompose_covariance(np.asarray(covariance, dtype=np.float32), eigenvalue_epsilon=0.0)
+        for covariance in covariances
+    ]
+    if colors is None:
+        colors = [[0.5, 0.5, 0.5]] * len(means)
+    return GaussianProposals.from_lists(
+        means=[np.asarray(mean, dtype=np.float32) for mean in means],
+        covariances=[result.covariance for result in pca_results],
+        scales=[result.scales for result in pca_results],
+        quats=[rotation_matrix_to_quaternion(result.basis) for result in pca_results],
+        sh_dc=[rgb_to_sh_dc(np.asarray(color, dtype=np.float32)) for color in colors],
+        opacities=[0.1] * len(means),
+        confidences=[1.0] * len(means),
+        view_ids=list(range(len(means))),
+        scores=[1.0] * len(means),
+    )

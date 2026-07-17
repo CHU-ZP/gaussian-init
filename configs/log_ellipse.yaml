@@ -6,22 +6,32 @@ scene:
   output_path: init/fused_gaussians.pt
 
 sampling:
+  chroma_weight: 1.0
+  response_mad_epsilon: 0.01
   sigmas: [1.0, 1.6, 2.5, 4.0, 6.4, 10.0]
-  response_threshold: 0.005
+  response_threshold: 1.0
   max_keypoints_per_view: 12000
   confidence_percentile: 25.0
-  min_distance: 3
-  nms_radius_factor: 3.0
   structure_sigma_factor: 1.5
   ellipse_radius_factor: 2.5
   min_ellipse_area: 12.0
   max_ellipse_area: 800.0
-  max_axis_ratio: 8.0
+  max_axis_ratio: 4.0
+  ellipse_merge:
+    iou_min: 0.35
+    orientation_max_degrees: 30.0
+    isotropic_axis_ratio: 1.2
+    color_delta_e_max: 30.0
+    continuity_ratio_max: 3.0
+    grid_cell_factor: 5.0
+    merged_area_factor_max: 1.5
+    merged_area_absolute_max: 1500.0
 
 covariance:
-  min_valid_points: 12
+  min_valid_points: 16
   min_valid_fraction: 0.6
-  max_center_distance: null
+  continuity_neighbors: 8
+  continuity_ratio_max: 3.0
   confidence_weighted: true
   device: auto
   pixel_budget: 2000000
@@ -30,7 +40,7 @@ pca:
   eigenvalue_epsilon: 1.0e-8
   scale_min: 1.0e-5
   scale_max: 1.0
-  condition_max: 100000000.0
+  condition_max: 10000.0
 
 gaussian:
   opacity: 0.1
@@ -38,3 +48,8 @@ gaussian:
 fusion:
   enabled: true
   voxel_size: 0.015
+  overlap_mahalanobis_max: 9.0
+  covariance_regularization_factor: 0.25
+  normal_angle_max_degrees: 30.0
+  scale_ratio_max: 3.0
+  color_delta_e_max: 20.0

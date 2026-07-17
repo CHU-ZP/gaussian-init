@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .continuity import global_scene_step_scale
+
 
 @dataclass(frozen=True)
 class EllipseCovarianceResults:
@@ -12,6 +14,7 @@ class EllipseCovarianceResults:
     valid_counts: np.ndarray
     support_counts: np.ndarray
     valid: np.ndarray
+    continuity_reference_scale: float
 
 
 def compute_covariances(
@@ -25,7 +28,8 @@ def compute_covariances(
     confidence_threshold: float,
     min_valid_points: int,
     min_valid_fraction: float,
-    max_center_distance: float | None,
+    continuity_neighbors: int,
+    continuity_ratio_max: float,
     confidence_weighted: bool,
     device: str,
     pixel_budget: int,
@@ -58,8 +62,18 @@ def compute_covariances(
         confidence_threshold=confidence_threshold,
         min_valid_points=min_valid_points,
         min_valid_fraction=min_valid_fraction,
-        max_center_distance=max_center_distance,
+        continuity_neighbors=continuity_neighbors,
+        continuity_ratio_max=continuity_ratio_max,
         pixel_budget=pixel_budget,
+    )
+    continuity_valid_np = image_valid_np.copy()
+    continuity_valid_np &= np.isfinite(points_np).all(axis=-1)
+    continuity_valid_np &= np.isfinite(confidence_np)
+    continuity_valid_np &= confidence_np >= float(confidence_threshold)
+    continuity_reference_scale = global_scene_step_scale(
+        points_np,
+        continuity_valid_np,
+        neighbors=continuity_neighbors,
     )
 
     count = len(us_np)
@@ -70,6 +84,7 @@ def compute_covariances(
             valid_counts=np.empty((0,), dtype=np.int64),
             support_counts=np.empty((0,), dtype=np.int64),
             valid=np.empty((0,), dtype=bool),
+            continuity_reference_scale=continuity_reference_scale,
         )
 
     torch_device = resolve_device(device)
@@ -120,8 +135,12 @@ def compute_covariances(
                 confidence_threshold=confidence_threshold,
                 min_valid_points=min_valid_points,
                 min_valid_fraction=min_valid_fraction,
-                max_center_distance=max_center_distance,
+                continuity_neighbors=continuity_neighbors,
+                continuity_ratio_max=continuity_ratio_max,
+                continuity_reference_scale=continuity_reference_scale,
                 confidence_weighted=confidence_weighted,
+                extent_x=int(extent_x),
+                extent_y=int(extent_y),
             )
             output_covariances[indices_np] = result[0].detach().cpu().numpy()
             output_confidences[indices_np] = result[1].detach().cpu().numpy()
@@ -135,6 +154,7 @@ def compute_covariances(
         valid_counts=output_valid_counts,
         support_counts=output_support_counts,
         valid=output_valid,
+        continuity_reference_scale=continuity_reference_scale,
     )
 
 
@@ -195,8 +215,12 @@ def _compute_chunk(
     confidence_threshold: float,
     min_valid_points: int,
     min_valid_fraction: float,
-    max_center_distance: float | None,
+    continuity_neighbors: int,
+    continuity_ratio_max: float,
+    continuity_reference_scale: float,
     confidence_weighted: bool,
+    extent_x: int,
+    extent_y: int,
 ):
     import torch
 
@@ -219,10 +243,10 @@ def _compute_chunk(
     gathered_points = points.reshape(-1, 3)[flat_indices]
     gathered_confidence = confidences.reshape(-1)[flat_indices]
     gathered_image_valid = image_valid.reshape(-1)[flat_indices]
-    valid = support & torch.isfinite(gathered_points).all(dim=-1)
-    valid &= gathered_image_valid
-    valid &= torch.isfinite(gathered_confidence)
-    valid &= gathered_confidence >= float(confidence_threshold)
+    candidate = support & torch.isfinite(gathered_points).all(dim=-1)
+    candidate &= gathered_image_valid
+    candidate &= torch.isfinite(gathered_confidence)
+    candidate &= gathered_confidence >= float(confidence_threshold)
     center_points = points[vs, us]
     center_confidences = confidences[vs, us]
     center_image_valid = image_valid[vs, us]
@@ -231,9 +255,15 @@ def _compute_chunk(
     center_valid &= center_confidences >= float(confidence_threshold)
     center_valid &= center_image_valid
 
-    if max_center_distance is not None:
-        distances = torch.linalg.norm(gathered_points - center_points[:, None, :], dim=-1)
-        valid &= torch.isfinite(distances) & (distances <= float(max_center_distance))
+    valid = _center_connected_component(
+        gathered_points,
+        candidate,
+        extent_x=extent_x,
+        extent_y=extent_y,
+        continuity_neighbors=continuity_neighbors,
+        continuity_ratio_max=continuity_ratio_max,
+        continuity_reference_scale=continuity_reference_scale,
+    )
 
     valid_counts = valid.sum(dim=1)
     support_counts = full_support.sum(dim=1)
@@ -276,6 +306,87 @@ def _compute_chunk(
     return covariances, mean_confidences, valid_counts, support_counts, accepted
 
 
+def _center_connected_component(
+    points,
+    candidate,
+    *,
+    extent_x: int,
+    extent_y: int,
+    continuity_neighbors: int,
+    continuity_ratio_max: float,
+    continuity_reference_scale: float,
+):
+    """Keep the globally step-bounded 3D component containing the keypoint.
+
+    Candidate edges follow the image's 4- or 8-neighbor topology. An edge is
+    traversable when its 3D step per image pixel is no larger than
+    ``continuity_ratio_max * continuity_reference_scale``. The reference is one
+    robust median for the whole view, so an anomalous endpoint cannot relax its
+    own threshold.
+    """
+    import torch
+
+    batch = points.shape[0]
+    grid_height = 2 * extent_y + 1
+    grid_width = 2 * extent_x + 1
+    grid_points = points.reshape(batch, grid_height, grid_width, 3)
+    grid_candidate = candidate.reshape(batch, grid_height, grid_width)
+    offsets = _neighbor_offsets(continuity_neighbors)
+
+    tolerance = float(continuity_ratio_max) * max(
+        float(continuity_reference_scale),
+        1.0e-12,
+    )
+    edge_masks = []
+    for delta_y, delta_x in offsets:
+        target_y, source_y = _paired_slices(grid_height, delta_y)
+        target_x, source_x = _paired_slices(grid_width, delta_x)
+        target_valid = grid_candidate[:, target_y, target_x]
+        source_valid = grid_candidate[:, source_y, source_x]
+        point_delta = grid_points[:, source_y, source_x] - grid_points[:, target_y, target_x]
+        pixel_step = float(np.hypot(delta_x, delta_y))
+        step = torch.linalg.norm(point_delta, dim=-1) / pixel_step
+        edge = target_valid & source_valid & torch.isfinite(step)
+        edge &= step <= tolerance
+        edge_grid = torch.zeros_like(grid_candidate)
+        edge_grid[:, target_y, target_x] = edge
+        edge_masks.append(edge_grid)
+
+    connected = torch.zeros_like(grid_candidate)
+    connected[:, extent_y, extent_x] = grid_candidate[:, extent_y, extent_x]
+    # The usual ellipse converges in roughly its radius.  The full grid-size
+    # bound also handles winding valid regions exactly.
+    for _ in range(grid_height * grid_width):
+        expanded = connected.clone()
+        for (delta_y, delta_x), edge_grid in zip(offsets, edge_masks, strict=True):
+            target_y, source_y = _paired_slices(grid_height, delta_y)
+            target_x, source_x = _paired_slices(grid_width, delta_x)
+            expanded[:, target_y, target_x] |= (
+                connected[:, source_y, source_x] & edge_grid[:, target_y, target_x]
+            )
+        updated = expanded & grid_candidate
+        if torch.equal(updated, connected):
+            break
+        connected = updated
+    return connected.reshape_as(candidate)
+
+
+def _neighbor_offsets(neighbors: int) -> tuple[tuple[int, int], ...]:
+    cardinal = ((-1, 0), (0, -1), (0, 1), (1, 0))
+    if neighbors == 4:
+        return cardinal
+    return cardinal + ((-1, -1), (-1, 1), (1, -1), (1, 1))
+
+
+def _paired_slices(length: int, delta: int) -> tuple[slice, slice]:
+    """Return aligned target/source slices with source = target + delta."""
+    if delta < 0:
+        return slice(-delta, length), slice(0, length + delta)
+    if delta > 0:
+        return slice(0, length - delta), slice(delta, length)
+    return slice(0, length), slice(0, length)
+
+
 def _rectangle_offsets(extent_x: int, extent_y: int, device):
     import torch
 
@@ -296,7 +407,8 @@ def _validate_inputs(
     confidence_threshold: float,
     min_valid_points: int,
     min_valid_fraction: float,
-    max_center_distance: float | None,
+    continuity_neighbors: int,
+    continuity_ratio_max: float,
     pixel_budget: int,
 ) -> None:
     if world_points.ndim != 3 or world_points.shape[-1] != 3:
@@ -327,9 +439,9 @@ def _validate_inputs(
         raise ValueError("min_valid_fraction must lie in [0, 1]")
     if not np.isfinite(confidence_threshold):
         raise ValueError("confidence_threshold must be finite")
-    if max_center_distance is not None and (
-        not np.isfinite(max_center_distance) or max_center_distance <= 0.0
-    ):
-        raise ValueError("max_center_distance must be positive")
+    if continuity_neighbors not in {4, 8}:
+        raise ValueError("continuity_neighbors must be 4 or 8")
+    if not np.isfinite(continuity_ratio_max) or continuity_ratio_max < 1.0:
+        raise ValueError("continuity_ratio_max must be finite and at least one")
     if pixel_budget <= 0:
         raise ValueError("pixel_budget must be positive")

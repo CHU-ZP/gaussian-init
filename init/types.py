@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 
@@ -72,23 +71,6 @@ class GaussianProposals:
             confidences=np.asarray(confidences, dtype=np.float32),
             view_ids=np.asarray(view_ids, dtype=np.int64),
             scores=np.asarray(scores, dtype=np.float32),
-        )
-
-    @classmethod
-    def concat(cls, proposals: Iterable["GaussianProposals"]) -> "GaussianProposals":
-        items = [item for item in proposals if len(item) > 0]
-        if not items:
-            return cls.empty()
-        return cls(
-            means=np.concatenate([item.means for item in items], axis=0),
-            covariances=np.concatenate([item.covariances for item in items], axis=0),
-            scales=np.concatenate([item.scales for item in items], axis=0),
-            quats=np.concatenate([item.quats for item in items], axis=0),
-            sh_dc=np.concatenate([item.sh_dc for item in items], axis=0),
-            opacities=np.concatenate([item.opacities for item in items], axis=0),
-            confidences=np.concatenate([item.confidences for item in items], axis=0),
-            view_ids=np.concatenate([item.view_ids for item in items], axis=0),
-            scores=np.concatenate([item.scores for item in items], axis=0),
         )
 
     def __len__(self) -> int:

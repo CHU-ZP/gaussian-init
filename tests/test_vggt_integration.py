@@ -87,18 +87,16 @@ def test_unbounded_vggt_confidence_normalizes_for_ply() -> None:
     assert np.all(np.diff(normalized) > 0.0)
 
 
-def test_stale_runner_predictions_are_rejected() -> None:
+def test_incompatible_runner_predictions_are_rejected() -> None:
     runner_output = {
         "model_id": np.asarray("facebook/VGGT-1B"),
         "world_points_source": np.asarray("depth_unprojection"),
         "processed_images": np.zeros((1, 2, 2, 3), dtype=np.float32),
     }
-    with pytest.raises(RuntimeError, match="old mixed-precision VGGT-head path"):
+    with pytest.raises(RuntimeError, match="precision contract is incompatible"):
         validate_vggt_precision_contract(runner_output)
 
-    runner_output["precision_contract"] = np.asarray(
-        "vggt_aggregator_amp_heads_float32_v1"
-    )
+    runner_output["precision_contract"] = np.asarray("vggt_aggregator_amp_heads_float32_v1")
     runner_output["head_dtype"] = np.asarray("float32")
     validate_vggt_precision_contract(runner_output)
 

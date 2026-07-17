@@ -133,9 +133,7 @@ def unproject_depths(
     return world_points
 
 
-def load_images(
-    images_dir: str | Path, *, target_size: tuple[int, int] | None = None
-) -> np.ndarray:
+def load_images(images_dir: str | Path) -> np.ndarray:
     root = Path(images_dir)
     if not root.exists():
         raise FileNotFoundError(f"Image directory not found: {root}")
@@ -147,8 +145,6 @@ def load_images(
     images = []
     for path in paths:
         image = Image.open(path).convert("RGB")
-        if target_size is not None and image.size != target_size:
-            image = image.resize(target_size, Image.BILINEAR)
         images.append(np.asarray(image, dtype=np.float32) / 255.0)
     return np.stack(images, axis=0)
 

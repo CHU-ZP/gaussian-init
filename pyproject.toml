@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vggt-pca-gsplat"
 version = "0.1.0"
-description = "VGGT dense geometry to PCA-initialized Gaussians for gsplat."
+description = "VGGT geometry to multichannel Lab LoG-ellipse Gaussian initialization."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [

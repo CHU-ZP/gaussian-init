@@ -14,12 +14,21 @@ class PCAFilterConfig:
     scale_max: float
     condition_max: float
 
+    def __post_init__(self) -> None:
+        values = (self.scale_min, self.scale_max, self.condition_max)
+        if not np.isfinite(values).all():
+            raise ValueError("PCA filter bounds must be finite")
+        if self.scale_min <= 0.0 or self.scale_max < self.scale_min:
+            raise ValueError("PCA scale bounds must satisfy 0 < scale_min <= scale_max")
+        if self.condition_max < 1.0:
+            raise ValueError("PCA condition_max must be at least one")
+
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "PCAFilterConfig":
         return cls(
             scale_min=float(config.get("scale_min", 1.0e-5)),
             scale_max=float(config.get("scale_max", 1.0)),
-            condition_max=float(config.get("condition_max", 5000.0)),
+            condition_max=float(config.get("condition_max", 10000.0)),
         )
 
 

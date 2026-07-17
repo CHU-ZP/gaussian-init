@@ -7,9 +7,11 @@ import torch
 from PIL import Image
 
 from gsplat_train.model import GaussianModel
-from init.build_init import build_gaussian_initialization
+from init.build_init import build_gaussian_initialization, validate_initialization_config
+from init.fusion import FusionConfig
 from init.gaussian_params import scale_quat_to_covariance
 from init.io import load_config
+from init.sampling import SamplingConfig
 
 
 def test_build_init_from_multiscale_ellipse_predictions(tmp_path: Path) -> None:
@@ -100,21 +102,20 @@ def make_config(scene_root: Path) -> dict:
         },
         "sampling": {
             "sigmas": [1.0, 2.0, 3.0, 4.5, 7.0, 10.0],
-            "response_threshold": 0.002,
+            "response_threshold": 1.0,
             "max_keypoints_per_view": 128,
             "confidence_percentile": 25.0,
-            "min_distance": 3,
-            "nms_radius_factor": 3.0,
             "structure_sigma_factor": 1.5,
             "ellipse_radius_factor": 2.5,
             "min_ellipse_area": 12.0,
             "max_ellipse_area": 400.0,
-            "max_axis_ratio": 6.0,
+            "max_axis_ratio": 4.0,
         },
         "covariance": {
-            "min_valid_points": 8,
+            "min_valid_points": 16,
             "min_valid_fraction": 0.6,
-            "max_center_distance": None,
+            "continuity_neighbors": 8,
+            "continuity_ratio_max": 3.0,
             "confidence_weighted": False,
             "device": "cpu",
             "pixel_budget": 100000,
@@ -123,8 +124,24 @@ def make_config(scene_root: Path) -> dict:
             "eigenvalue_epsilon": 1.0e-8,
             "scale_min": 1.0e-5,
             "scale_max": 1.0,
-            "condition_max": 1.0e8,
+            "condition_max": 10000.0,
         },
         "gaussian": {"opacity": 0.1},
         "fusion": {"enabled": False, "voxel_size": 0.05},
     }
+
+
+def test_unknown_initialization_config_key_is_rejected() -> None:
+    with np.testing.assert_raises_regex(ValueError, "Unknown covariance config key"):
+        validate_initialization_config({"covariance": {"unexpected_option": 0.1}})
+
+    with np.testing.assert_raises_regex(ValueError, "Unknown sampling.ellipse_merge config key"):
+        validate_initialization_config({"sampling": {"ellipse_merge": {"typo": 0.1}}})
+
+
+def test_sampling_defaults_match_production_config() -> None:
+    production_config = load_config(
+        Path(__file__).resolve().parents[1] / "configs" / "log_ellipse.yaml"
+    )
+    assert SamplingConfig.from_mapping(production_config["sampling"]) == SamplingConfig()
+    assert FusionConfig.from_mapping(production_config["fusion"]) == FusionConfig()

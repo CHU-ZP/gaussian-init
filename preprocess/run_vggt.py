@@ -114,7 +114,9 @@ def run_real_vggt(
     print(f"Preprocessed tensor shape: {tuple(images.shape)}")
 
     print(f"Running VGGT on {device} with dtype {dtype}")
-    print(f"Running VGGT depth/point heads in float32 with frame chunks of {head_frames_chunk_size}")
+    print(
+        f"Running VGGT depth/point heads in float32 with frame chunks of {head_frames_chunk_size}"
+    )
     autocast_context = (
         torch.cuda.amp.autocast(dtype=dtype) if device.type == "cuda" else nullcontext()
     )
@@ -252,9 +254,7 @@ def validate_camera_parameters(extrinsics_w2c: np.ndarray, intrinsics: np.ndarra
 
     rotations = extrinsics[:, :3, :3]
     identity = np.eye(3, dtype=np.float64)
-    orthogonality_error = float(
-        np.max(np.abs(np.swapaxes(rotations, 1, 2) @ rotations - identity))
-    )
+    orthogonality_error = float(np.max(np.abs(np.swapaxes(rotations, 1, 2) @ rotations - identity)))
     determinant_error = float(np.max(np.abs(np.linalg.det(rotations) - 1.0)))
     if orthogonality_error > 1.0e-3 or determinant_error > 1.0e-3:
         raise ValueError(

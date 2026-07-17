@@ -8,7 +8,7 @@ import numpy as np
 
 from .ellipses import compute_covariances
 from .filters import PCAFilterConfig, valid_pca
-from .fusion import voxel_fuse
+from .fusion import FusionConfig, similarity_graph_fuse
 from .gaussian_params import rgb_to_sh_dc, rotation_matrix_to_quaternion, sh_dc_to_rgb
 from .io import (
     load_config,
@@ -19,7 +19,7 @@ from .io import (
     write_ply,
 )
 from .pca import decompose_covariance
-from .sampling import detect_multiscale_keypoints
+from .sampling import INITIALIZATION_METHOD, SamplingConfig, detect_multiscale_keypoints
 from .types import GaussianProposals
 
 
@@ -31,6 +31,7 @@ def build_gaussian_initialization(
     output_override: str | Path | None = None,
     force_no_fusion: bool = False,
 ) -> tuple[GaussianProposals, GaussianProposals, dict[str, Any]]:
+    validate_initialization_config(config)
     scene_cfg = config.get("scene", {})
     scene_root = Path(scene_root_override or scene_cfg.get("root", "data/scene_x"))
     predictions_path = resolve_scene_path(
@@ -66,17 +67,17 @@ def build_gaussian_initialization(
         dtype=bool,
     )
 
-    sampling_cfg = config.get("sampling", {})
+    sampling = SamplingConfig.from_mapping(config.get("sampling"))
     covariance_cfg = config.get("covariance", {})
     pca_cfg = config.get("pca", {})
     gaussian_cfg = config.get("gaussian", {})
-    fusion_cfg = config.get("fusion", {})
-    _reject_removed_config(config)
-
+    fusion = FusionConfig.from_mapping(config.get("fusion"))
     eigenvalue_epsilon = float(pca_cfg.get("eigenvalue_epsilon", 1.0e-8))
     pca_filter = PCAFilterConfig.from_config(pca_cfg)
     opacity = float(gaussian_cfg.get("opacity", 0.1))
-    confidence_percentile = float(sampling_cfg.get("confidence_percentile", 25.0))
+    if not np.isfinite(opacity) or not 0.0 < opacity < 1.0:
+        raise ValueError("gaussian.opacity must lie strictly between zero and one")
+    confidence_percentile = sampling.confidence_percentile
     confidence_threshold = confidence_threshold_from_percentile(
         confidence,
         world_points,
@@ -104,6 +105,7 @@ def build_gaussian_initialization(
         "rejected_pca": 0,
         "confidence_percentile": confidence_percentile,
         "confidence_threshold_value": confidence_threshold,
+        "continuity_reference_scales": [],
     }
 
     for view in range(views):
@@ -112,17 +114,18 @@ def build_gaussian_initialization(
             image=images[view],
             confidence=confidence[view],
             world_points=world_points[view],
-            sigmas=sampling_cfg.get("sigmas", [1.0, 1.6, 2.5, 4.0, 6.4]),
-            response_threshold=float(sampling_cfg.get("response_threshold", 0.005)),
-            max_keypoints=int(sampling_cfg.get("max_keypoints_per_view", 10000)),
-            min_distance=int(sampling_cfg.get("min_distance", 3)),
-            nms_radius_factor=float(sampling_cfg.get("nms_radius_factor", 3.0)),
-            structure_sigma_factor=float(sampling_cfg.get("structure_sigma_factor", 1.5)),
-            ellipse_radius_factor=float(sampling_cfg.get("ellipse_radius_factor", 2.5)),
-            min_ellipse_area=float(sampling_cfg.get("min_ellipse_area", 12.0)),
-            max_ellipse_area=float(sampling_cfg.get("max_ellipse_area", 800.0)),
-            max_axis_ratio=float(sampling_cfg.get("max_axis_ratio", 8.0)),
+            sigmas=sampling.sigmas,
+            response_threshold=sampling.response_threshold,
+            max_keypoints=sampling.max_keypoints_per_view,
+            structure_sigma_factor=sampling.structure_sigma_factor,
+            ellipse_radius_factor=sampling.ellipse_radius_factor,
+            min_ellipse_area=sampling.min_ellipse_area,
+            max_ellipse_area=sampling.max_ellipse_area,
+            max_axis_ratio=sampling.max_axis_ratio,
             confidence_threshold=confidence_threshold,
+            chroma_weight=sampling.chroma_weight,
+            response_mad_epsilon=sampling.response_mad_epsilon,
+            ellipse_merge_config=sampling.ellipse_merge,
             image_valid_mask=image_valid_masks[view],
         )
         stats["detected_keypoints"] += len(keypoints)
@@ -134,13 +137,15 @@ def build_gaussian_initialization(
             keypoints.ellipse_matrices,
             image_valid_mask=image_valid_masks[view],
             confidence_threshold=confidence_threshold,
-            min_valid_points=int(covariance_cfg.get("min_valid_points", 8)),
+            min_valid_points=int(covariance_cfg.get("min_valid_points", 16)),
             min_valid_fraction=float(covariance_cfg.get("min_valid_fraction", 0.6)),
-            max_center_distance=covariance_cfg.get("max_center_distance"),
+            continuity_neighbors=int(covariance_cfg.get("continuity_neighbors", 8)),
+            continuity_ratio_max=float(covariance_cfg.get("continuity_ratio_max", 3.0)),
             confidence_weighted=bool(covariance_cfg.get("confidence_weighted", True)),
             device=str(covariance_cfg.get("device", "auto")),
             pixel_budget=int(covariance_cfg.get("pixel_budget", 2_000_000)),
         )
+        stats["continuity_reference_scales"].append(covariance_results.continuity_reference_scale)
         stats["rejected_covariance"] += int(np.count_nonzero(~covariance_results.valid))
 
         for index in np.flatnonzero(covariance_results.valid):
@@ -186,32 +191,53 @@ def build_gaussian_initialization(
         proposals_path,
         proposals,
         metadata={
-            "stage": "per_view_log_ellipse_proposals",
+            "stage": "per_view_gaussian_proposals",
+            "initialization_contract": INITIALIZATION_METHOD,
             "source_predictions": str(predictions_path),
             "stats": dict(stats),
         },
     )
 
-    fusion_enabled = bool(fusion_cfg.get("enabled", False)) and not force_no_fusion
+    fusion_enabled = fusion.enabled and not force_no_fusion
     if fusion_enabled:
-        voxel_size = float(fusion_cfg.get("voxel_size", 0.02))
-        if not np.isfinite(voxel_size) or voxel_size <= 0.0:
-            raise ValueError("fusion.voxel_size must be finite and positive")
-        pre_filter_clusters = len(
-            np.unique(np.floor(proposals.means / voxel_size).astype(np.int64), axis=0)
-        )
-        fused = voxel_fuse(
+        fusion_result = similarity_graph_fuse(
             proposals,
-            voxel_size=voxel_size,
+            config=fusion,
             eigenvalue_epsilon=eigenvalue_epsilon,
             pca_filter=pca_filter,
         )
-        stats["rejected_fusion_pca"] = pre_filter_clusters - len(fused)
-        if len(fused) == 0:
-            raise RuntimeError("All fused Gaussians failed the configured PCA filters")
+        fused = fusion_result.gaussians
+        fusion_stats = fusion_result.stats
+        stats.update(
+            {
+                "fusion_candidate_pairs": fusion_stats.candidate_pairs,
+                "fusion_compatible_pairs": fusion_stats.compatible_pairs,
+                "fusion_pairs_failing_overlap": fusion_stats.pairs_failing_overlap,
+                "fusion_pairs_failing_normal": fusion_stats.pairs_failing_normal,
+                "fusion_pairs_failing_scale": fusion_stats.pairs_failing_scale,
+                "fusion_pairs_failing_color": fusion_stats.pairs_failing_color,
+                "fusion_components": fusion_stats.components,
+                "fusion_singleton_components": fusion_stats.singleton_components,
+                "fusion_merged_components": fusion_stats.merged_components,
+                "fusion_fallback_components": fusion_stats.fallback_components,
+            }
+        )
     else:
         fused = proposals
-        stats["rejected_fusion_pca"] = 0
+        stats.update(
+            {
+                "fusion_candidate_pairs": 0,
+                "fusion_compatible_pairs": 0,
+                "fusion_pairs_failing_overlap": 0,
+                "fusion_pairs_failing_normal": 0,
+                "fusion_pairs_failing_scale": 0,
+                "fusion_pairs_failing_color": 0,
+                "fusion_components": len(proposals),
+                "fusion_singleton_components": len(proposals),
+                "fusion_merged_components": 0,
+                "fusion_fallback_components": 0,
+            }
+        )
 
     stats["fused_gaussians"] = len(fused)
     stats["fusion_enabled"] = fusion_enabled
@@ -219,7 +245,8 @@ def build_gaussian_initialization(
         output_path,
         fused,
         metadata={
-            "stage": "fused_log_ellipse_gaussians",
+            "stage": "fused_gaussian_initialization",
+            "initialization_contract": INITIALIZATION_METHOD,
             "source_predictions": str(predictions_path),
             "source_proposals": str(proposals_path),
             "stats": dict(stats),
@@ -287,7 +314,7 @@ def confidence_threshold_from_percentile(
 
 
 def validate_vggt_precision_contract(predictions: dict[str, np.ndarray]) -> None:
-    """Reject stale files produced by this runner with mixed-precision VGGT heads."""
+    """Require float32 VGGT head outputs from prediction files made by this runner."""
     generated_by_runner = all(
         key in predictions for key in ("model_id", "world_points_source", "processed_images")
     )
@@ -296,33 +323,89 @@ def validate_vggt_precision_contract(predictions: dict[str, np.ndarray]) -> None
     contract = str(np.asarray(predictions.get("precision_contract", "")).item())
     if contract != "vggt_aggregator_amp_heads_float32_v1":
         raise RuntimeError(
-            "This predictions.npz was generated by the old mixed-precision VGGT-head path. "
-            "Delete it and rerun preprocess.run_vggt before building the initialization."
+            "The predictions.npz precision contract is incompatible; rerun "
+            "preprocess.run_vggt before building the initialization."
         )
     head_dtype = str(np.asarray(predictions.get("head_dtype", "")).item())
     if head_dtype != "float32":
         raise RuntimeError("VGGT prediction heads must use float32 outputs")
 
 
-def _reject_removed_config(config: dict[str, Any]) -> None:
-    sampling = config.get("sampling", {})
-    removed_sampling = {"mode", "stride", "salient_fraction"}.intersection(sampling)
-    if removed_sampling:
-        names = ", ".join(sorted(removed_sampling))
-        raise ValueError(f"Removed basic sampling options are not supported: {names}")
-    if "confidence_threshold" in sampling:
-        raise ValueError(
-            "sampling.confidence_threshold used the wrong convention for VGGT scores; "
-            "use confidence_percentile instead"
-        )
-    if "patch" in config:
-        raise ValueError(
-            "The fixed square patch configuration was removed; use covariance settings"
-        )
+_INITIALIZATION_SECTION_KEYS = {
+    "scene": {"root", "images_dir", "predictions_path", "proposals_path", "output_path"},
+    "sampling": {
+        "sigmas",
+        "response_threshold",
+        "max_keypoints_per_view",
+        "confidence_percentile",
+        "structure_sigma_factor",
+        "ellipse_radius_factor",
+        "min_ellipse_area",
+        "max_ellipse_area",
+        "max_axis_ratio",
+        "chroma_weight",
+        "response_mad_epsilon",
+        "ellipse_merge",
+    },
+    "covariance": {
+        "min_valid_points",
+        "min_valid_fraction",
+        "continuity_neighbors",
+        "continuity_ratio_max",
+        "confidence_weighted",
+        "device",
+        "pixel_budget",
+    },
+    "pca": {"eigenvalue_epsilon", "scale_min", "scale_max", "condition_max"},
+    "gaussian": {"opacity"},
+    "fusion": {
+        "enabled",
+        "voxel_size",
+        "overlap_mahalanobis_max",
+        "covariance_regularization_factor",
+        "normal_angle_max_degrees",
+        "scale_ratio_max",
+        "color_delta_e_max",
+    },
+}
+
+
+def validate_initialization_config(config: dict[str, Any]) -> None:
+    """Reject unknown keys in initialization-owned configuration sections."""
+    allowed_sections = set(_INITIALIZATION_SECTION_KEYS) | {"_config_path"}
+    unknown_sections = sorted(set(config) - allowed_sections)
+    if unknown_sections:
+        names = ", ".join(unknown_sections)
+        raise ValueError(f"Unknown initialization config section(s): {names}")
+    for section, allowed_keys in _INITIALIZATION_SECTION_KEYS.items():
+        values = config.get(section, {})
+        if not isinstance(values, dict):
+            raise ValueError(f"Config section '{section}' must be a mapping")
+        unknown = sorted(set(values) - allowed_keys)
+        if unknown:
+            names = ", ".join(unknown)
+            raise ValueError(f"Unknown {section} config key(s): {names}")
+    ellipse_merge = config.get("sampling", {}).get("ellipse_merge", {})
+    if not isinstance(ellipse_merge, dict):
+        raise ValueError("Config section 'sampling.ellipse_merge' must be a mapping")
+    allowed_merge_keys = {
+        "iou_min",
+        "orientation_max_degrees",
+        "isotropic_axis_ratio",
+        "color_delta_e_max",
+        "continuity_ratio_max",
+        "grid_cell_factor",
+        "merged_area_factor_max",
+        "merged_area_absolute_max",
+    }
+    unknown_merge = sorted(set(ellipse_merge) - allowed_merge_keys)
+    if unknown_merge:
+        names = ", ".join(unknown_merge)
+        raise ValueError(f"Unknown sampling.ellipse_merge config key(s): {names}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build LoG/ellipse PCA Gaussian parameters.")
+    parser = argparse.ArgumentParser(description="Build Lab LoG/ellipse PCA Gaussian parameters.")
     parser.add_argument("--config", required=True, help="Path to a YAML config.")
     parser.add_argument("--scene-root", default=None, help="Override scene root from config.")
     parser.add_argument("--predictions", default=None, help="Override predictions npz path.")

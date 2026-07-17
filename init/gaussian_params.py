@@ -2,29 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .pca import decompose_covariance
-
 SH_C0 = 0.28209479177387814
-
-
-def covariance_to_scale_quat(
-    covariance: np.ndarray,
-    *,
-    eigenvalue_epsilon: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    result = decompose_covariance(covariance, eigenvalue_epsilon=eigenvalue_epsilon)
-    scales = result.scales
-    quat = rotation_matrix_to_quaternion(result.basis)
-    return scales, quat
-
-
-def estimate_local_pca_from_covariance(
-    covariance: np.ndarray,
-    *,
-    eigenvalue_epsilon: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    result = decompose_covariance(covariance, eigenvalue_epsilon=eigenvalue_epsilon)
-    return result.eigenvalues, result.basis
 
 
 def rgb_to_sh_dc(rgb: np.ndarray) -> np.ndarray:
