@@ -1,6 +1,0 @@
--c constraints.txt
-
-numpy
-Pillow
-PyYAML
-requests>=2.31

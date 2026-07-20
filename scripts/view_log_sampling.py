@@ -11,13 +11,12 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from init.build_init import (
-    confidence_threshold_from_percentile,
     load_scene_images,
     validate_initialization_config,
-    validate_vggt_precision_contract,
+    validate_prediction_precision_contract,
 )
 from init.ellipses import ellipse_mask
-from init.io import load_config, load_vggt_predictions, resolve_scene_path
+from init.io import load_config, load_dense_predictions, resolve_scene_path
 from init.sampling import (
     INITIALIZATION_METHOD,
     SamplingConfig,
@@ -64,10 +63,9 @@ def render_log_sampling(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),
     )
-    predictions = load_vggt_predictions(predictions_path)
-    validate_vggt_precision_contract(predictions)
+    predictions = load_dense_predictions(predictions_path)
+    validate_prediction_precision_contract(predictions)
     world_points = predictions["world_points"]
-    confidence = predictions["confidence"]
     views, height, width, _ = world_points.shape
     images = load_scene_images(
         scene_root,
@@ -89,13 +87,6 @@ def render_log_sampling(
 
     sampling = SamplingConfig.from_mapping(config.get("sampling"))
     sigma_values = sampling.sigmas
-    confidence_percentile = sampling.confidence_percentile
-    confidence_threshold = confidence_threshold_from_percentile(
-        confidence,
-        world_points,
-        image_valid_masks,
-        percentile=confidence_percentile,
-    )
     response_threshold = sampling.response_threshold
 
     destination = Path(output_dir)
@@ -105,7 +96,7 @@ def render_log_sampling(
 
     for view_id in selected_views:
         detector_image = images[view_id]
-        valid = valid_pixel_mask(confidence[view_id], world_points[view_id], confidence_threshold)
+        valid = valid_pixel_mask(world_points[view_id])
         valid &= image_valid_masks[view_id]
         scale_space = build_log_scale_space(
             detector_image,
@@ -121,10 +112,8 @@ def render_log_sampling(
         keypoints = detect_keypoints(
             view_id=view_id,
             image=detector_image,
-            confidence=confidence[view_id],
             world_points=world_points[view_id],
             image_valid_mask=image_valid_masks[view_id],
-            confidence_threshold=confidence_threshold,
             sampling=sampling,
         )
 
@@ -279,14 +268,12 @@ def render_log_sampling(
     summary: dict[str, Any] = {
         "config": str(config.get("_config_path", "")),
         "predictions": str(predictions_path),
-        "detector_input": "VGGT-aligned processed RGB before Gaussian blur",
+        "detector_input": "dense-geometry-aligned processed RGB before Gaussian blur",
         "detector": INITIALIZATION_METHOD,
         "chroma_weight": sampling.chroma_weight,
         "response_mad_epsilon": sampling.response_mad_epsilon,
         "sigmas": list(sigma_values),
         "response_threshold": response_threshold,
-        "confidence_percentile": confidence_percentile,
-        "confidence_threshold": confidence_threshold,
         "legend": {
             "support_fill": "green: discrete 2D ellipse support before 3D continuity",
             "channel_colors": "L=yellow, a=magenta, b=cyan",
@@ -294,7 +281,7 @@ def render_log_sampling(
             "keypoint_center": "white",
             "log_raw_extrema": "yellow",
             "log_selected_after_ellipse_merge": "white",
-            "invalid_pixels": "purple in blur panels; excluded by content/confidence mask",
+            "invalid_pixels": "purple in blur panels; excluded by content/finite-geometry mask",
         },
         "views": view_summaries,
         "csv": str(csv_path),
@@ -309,16 +296,13 @@ def detect_keypoints(
     *,
     view_id: int,
     image: np.ndarray,
-    confidence: np.ndarray,
     world_points: np.ndarray,
     image_valid_mask: np.ndarray,
-    confidence_threshold: float,
     sampling: SamplingConfig,
 ) -> EllipseKeypoints:
     return detect_multiscale_keypoints(
         view_id=view_id,
         image=image,
-        confidence=confidence,
         world_points=world_points,
         sigmas=sampling.sigmas,
         response_threshold=sampling.response_threshold,
@@ -328,7 +312,6 @@ def detect_keypoints(
         min_ellipse_area=sampling.min_ellipse_area,
         max_ellipse_area=sampling.max_ellipse_area,
         max_axis_ratio=sampling.max_axis_ratio,
-        confidence_threshold=confidence_threshold,
         chroma_weight=sampling.chroma_weight,
         response_mad_epsilon=sampling.response_mad_epsilon,
         ellipse_merge_config=sampling.ellipse_merge,

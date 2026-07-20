@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from init.io import load_images, load_vggt_predictions, resolve_scene_path
+from init.io import load_camera_archive, load_dense_predictions, load_images, resolve_scene_path
 
 
 @dataclass(frozen=True)
@@ -46,30 +46,40 @@ def load_scene_data(
     config: dict[str, Any],
     *,
     scene_root_override: str | Path | None = None,
+    predictions_override: str | Path | None = None,
     validate_projection: bool = False,
 ) -> SceneData:
     scene_cfg = config.get("scene", {})
     scene_root = Path(scene_root_override or scene_cfg.get("root", "data/scene_x"))
     images_dir = resolve_scene_path(scene_root, scene_cfg.get("images_dir", "images"))
     predictions_path = resolve_scene_path(
-        scene_root, scene_cfg.get("predictions_path", "vggt/predictions.npz")
+        scene_root,
+        predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),
     )
 
-    predictions = load_vggt_predictions(predictions_path)
-    world_points = predictions["world_points"]
-    views, height, width, _ = world_points.shape
+    with np.load(predictions_path) as archive:
+        has_dense_geometry = "world_points" in archive.files or {
+            "depth",
+            "intrinsics",
+            "extrinsics",
+        }.issubset(archive.files)
+    predictions = (
+        load_dense_predictions(predictions_path)
+        if has_dense_geometry
+        else load_camera_archive(predictions_path)
+    )
+    world_points = predictions.get("world_points")
     if "processed_images" in predictions:
-        images = predictions["processed_images"]
+        images = np.asarray(predictions["processed_images"], dtype=np.float32)
     else:
         images = load_images(images_dir)
-    if images.shape[0] != views:
+    if images.ndim != 4 or images.shape[-1] != 3:
+        raise ValueError("Scene images must have shape [V, H, W, 3]")
+    views, height, width, _ = images.shape
+    if world_points is not None and world_points.shape != (views, height, width, 3):
         raise ValueError(
-            f"Image count ({images.shape[0]}) does not match prediction views ({views})"
-        )
-    if images.shape[1:3] != (height, width):
-        raise ValueError(
-            "Scene images are not pixel-aligned with VGGT predictions: "
-            f"images have {images.shape[1:3]}, predictions have {(height, width)}"
+            "Dense world points must be pixel-aligned with scene images: "
+            f"expected {(views, height, width, 3)}, got {world_points.shape}"
         )
     image_valid_mask = np.asarray(
         predictions.get(
@@ -86,7 +96,7 @@ def load_scene_data(
 
     intrinsics = predictions.get("intrinsics")
     if intrinsics is None:
-        raise ValueError("VGGT predictions must contain intrinsics for gsplat rendering")
+        raise ValueError("Dense predictions must contain intrinsics for gsplat rendering")
     intrinsics = np.asarray(intrinsics, dtype=np.float32)
     if intrinsics.shape != (views, 3, 3):
         raise ValueError(f"intrinsics must have shape {(views, 3, 3)}, got {intrinsics.shape}")
@@ -94,7 +104,7 @@ def load_scene_data(
     extrinsics_c2w = predictions.get("extrinsics_c2w", predictions.get("extrinsics"))
     extrinsics_w2c = predictions.get("extrinsics_w2c")
     if extrinsics_c2w is None and extrinsics_w2c is None:
-        raise ValueError("VGGT predictions must contain c2w or w2c extrinsics")
+        raise ValueError("Dense predictions must contain c2w or w2c extrinsics")
     if extrinsics_c2w is not None:
         extrinsics_c2w = np.asarray(extrinsics_c2w, dtype=np.float32)
     if extrinsics_w2c is not None:
@@ -134,13 +144,29 @@ def load_scene_data(
 
     reprojection_error = None
     if validate_projection:
-        reprojection_error = validate_world_point_projection(
-            world_points,
-            image_valid_mask,
-            intrinsics,
-            extrinsics_w2c,
-            max_error_px=float(config.get("training", {}).get("max_reprojection_error_px", 0.5)),
+        max_error_px = float(
+            config.get("training", {}).get("max_reprojection_error_px", 0.5)
         )
+        if world_points is not None:
+            reprojection_error = validate_world_point_projection(
+                world_points,
+                image_valid_mask,
+                intrinsics,
+                extrinsics_w2c,
+                max_error_px=max_error_px,
+            )
+        elif "reprojection_error_px" in predictions:
+            reprojection_error = float(np.asarray(predictions["reprojection_error_px"]))
+            if not np.isfinite(reprojection_error) or reprojection_error > max_error_px:
+                raise ValueError(
+                    f"Camera archive reprojection error {reprojection_error:.4f}px "
+                    f"> {max_error_px:.4f}px"
+                )
+        else:
+            raise ValueError(
+                "Camera-only archives must contain reprojection_error_px when projection "
+                "validation is enabled"
+            )
 
     return SceneData(
         images=images.astype(np.float32),
@@ -214,7 +240,7 @@ def validate_world_point_projection(
     error = float(np.percentile(np.concatenate(errors), 95.0))
     if not np.isfinite(error) or error > max_error_px:
         raise ValueError(
-            f"VGGT world points do not match camera projection: p95 error {error:.4f}px "
+            f"Dense world points do not match camera projection: p95 error {error:.4f}px "
             f"> {max_error_px:.4f}px"
         )
     return error

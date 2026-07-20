@@ -24,12 +24,10 @@ def test_log_detects_bright_and_dark_blobs_at_their_scales() -> None:
     image_gray -= 0.35 * gaussian_blob(xx, yy, 91, 78, 7.0)
     image = np.repeat(image_gray[..., None], 3, axis=-1).astype(np.float32)
     world_points = np.stack([xx / width, yy / width, np.ones_like(xx)], axis=-1).astype(np.float32)
-    confidence = np.ones((height, width), dtype=np.float32)
 
     keypoints = detect_multiscale_keypoints(
         view_id=2,
         image=image,
-        confidence=confidence,
         world_points=world_points,
         sigmas=[1.0, 2.0, 3.0, 4.5, 7.0, 10.0, 14.0],
         response_threshold=1.0,
@@ -39,7 +37,6 @@ def test_log_detects_bright_and_dark_blobs_at_their_scales() -> None:
         min_ellipse_area=12.0,
         max_ellipse_area=800.0,
         max_axis_ratio=4.0,
-        confidence_threshold=0.2,
     )
 
     small = nearest_keypoint(keypoints.us, keypoints.vs, 35, 42)
@@ -58,11 +55,9 @@ def test_log_detects_bright_and_dark_blobs_at_their_scales() -> None:
 def test_flat_image_has_no_log_extrema() -> None:
     image = np.full((32, 32, 3), 0.5, dtype=np.float32)
     points = np.zeros((32, 32, 3), dtype=np.float32)
-    confidence = np.ones((32, 32), dtype=np.float32)
     keypoints = detect_multiscale_keypoints(
         view_id=0,
         image=image,
-        confidence=confidence,
         world_points=points,
         sigmas=[1.0, 2.0, 4.0],
         response_threshold=1.0e-4,
@@ -72,13 +67,12 @@ def test_flat_image_has_no_log_extrema() -> None:
         min_ellipse_area=4.0,
         max_ellipse_area=100.0,
         max_axis_ratio=4.0,
-        confidence_threshold=0.2,
     )
     assert len(keypoints) == 0
 
 
 def test_same_scale_similar_ellipses_are_moment_merged() -> None:
-    candidates, lab, points, confidence, valid = make_merge_inputs(
+    candidates, lab, points, valid = make_merge_inputs(
         centers=[(8, 8), (10, 8)],
         levels=[0, 0],
         colors=[(0.5, 0.0, 0.0), (0.5, 0.0, 0.0)],
@@ -87,7 +81,6 @@ def test_same_scale_similar_ellipses_are_moment_merged() -> None:
         candidates,
         normalized_lab=lab,
         world_points=points,
-        confidence=confidence,
         valid_mask=valid,
         config=EllipseMergeConfig(),
         max_keypoints=16,
@@ -101,7 +94,7 @@ def test_same_scale_similar_ellipses_are_moment_merged() -> None:
 
 
 def test_ellipse_merge_rejects_color_and_cross_scale_pairs() -> None:
-    candidates, lab, points, confidence, valid = make_merge_inputs(
+    candidates, lab, points, valid = make_merge_inputs(
         centers=[(8, 8), (10, 8), (8, 8)],
         levels=[0, 0, 1],
         colors=[(0.5, 0.0, 0.0), (0.9, 0.0, 0.0), (0.5, 0.0, 0.0)],
@@ -110,7 +103,6 @@ def test_ellipse_merge_rejects_color_and_cross_scale_pairs() -> None:
         candidates,
         normalized_lab=lab,
         world_points=points,
-        confidence=confidence,
         valid_mask=valid,
         config=EllipseMergeConfig(color_delta_e_max=20.0),
         max_keypoints=16,
@@ -122,7 +114,7 @@ def test_ellipse_merge_rejects_color_and_cross_scale_pairs() -> None:
 
 
 def test_ellipse_merge_rejects_vggt_depth_discontinuity() -> None:
-    candidates, lab, points, confidence, valid = make_merge_inputs(
+    candidates, lab, points, valid = make_merge_inputs(
         centers=[(8, 8), (10, 8)],
         levels=[0, 0],
         colors=[(0.5, 0.0, 0.0), (0.5, 0.0, 0.0)],
@@ -134,7 +126,6 @@ def test_ellipse_merge_rejects_vggt_depth_discontinuity() -> None:
         candidates,
         normalized_lab=lab,
         world_points=points,
-        confidence=confidence,
         valid_mask=valid,
         config=EllipseMergeConfig(),
         max_keypoints=16,
@@ -145,7 +136,7 @@ def test_ellipse_merge_rejects_vggt_depth_discontinuity() -> None:
 
 
 def test_constrained_union_preserves_valid_submerge_when_chain_is_too_large() -> None:
-    candidates, lab, points, confidence, valid = make_merge_inputs(
+    candidates, lab, points, valid = make_merge_inputs(
         centers=[(7, 8), (10, 8), (13, 8)],
         levels=[0, 0, 0],
         colors=[(0.5, 0.0, 0.0)] * 3,
@@ -154,7 +145,6 @@ def test_constrained_union_preserves_valid_submerge_when_chain_is_too_large() ->
         candidates,
         normalized_lab=lab,
         world_points=points,
-        confidence=confidence,
         valid_mask=valid,
         config=EllipseMergeConfig(
             iou_min=0.3,
@@ -171,7 +161,7 @@ def test_constrained_union_preserves_valid_submerge_when_chain_is_too_large() ->
 
 
 def test_relaxed_color_and_removed_axis_scale_gate_allow_overlap_merge() -> None:
-    candidates, lab, points, confidence, valid = make_merge_inputs(
+    candidates, lab, points, valid = make_merge_inputs(
         centers=[(8, 8), (9, 8)],
         levels=[0, 0],
         colors=[(0.50, 0.0, 0.0), (0.75, 0.0, 0.0)],
@@ -183,7 +173,6 @@ def test_relaxed_color_and_removed_axis_scale_gate_allow_overlap_merge() -> None
         candidates,
         normalized_lab=lab,
         world_points=points,
-        confidence=confidence,
         valid_mask=valid,
         config=EllipseMergeConfig(),
         max_keypoints=16,
@@ -196,7 +185,7 @@ def test_relaxed_color_and_removed_axis_scale_gate_allow_overlap_merge() -> None
 def test_merged_area_can_exceed_raw_candidate_cap_but_stays_relative() -> None:
     raw_area = 800.0
     matrix_value = raw_area / np.pi
-    candidates, lab, points, confidence, valid = make_merge_inputs(
+    candidates, lab, points, valid = make_merge_inputs(
         centers=[(24, 32), (32, 32)],
         levels=[0, 0],
         colors=[(0.5, 0.0, 0.0)] * 2,
@@ -208,7 +197,6 @@ def test_merged_area_can_exceed_raw_candidate_cap_but_stays_relative() -> None:
         candidates,
         normalized_lab=lab,
         world_points=points,
-        confidence=confidence,
         valid_mask=valid,
         config=EllipseMergeConfig(),
         max_keypoints=16,
@@ -225,11 +213,9 @@ def test_padding_mask_does_not_create_log_seam_keypoints() -> None:
     content_mask = np.zeros((64, 64), dtype=bool)
     content_mask[16:48] = True
     points = np.zeros((64, 64, 3), dtype=np.float32)
-    confidence = np.ones((64, 64), dtype=np.float32)
     keypoints = detect_multiscale_keypoints(
         view_id=0,
         image=image,
-        confidence=confidence,
         world_points=points,
         sigmas=[1.0, 2.0, 4.0, 8.0],
         response_threshold=1.0e-4,
@@ -239,7 +225,6 @@ def test_padding_mask_does_not_create_log_seam_keypoints() -> None:
         min_ellipse_area=4.0,
         max_ellipse_area=200.0,
         max_axis_ratio=4.0,
-        confidence_threshold=0.2,
         image_valid_mask=content_mask,
     )
     assert len(keypoints) == 0
@@ -294,7 +279,6 @@ def test_lab_log_detects_isoluminant_color_blob() -> None:
     lab = detect_multiscale_keypoints(
         view_id=0,
         image=image,
-        confidence=np.ones((height, width), dtype=np.float32),
         world_points=world_points,
         sigmas=[1.0, 2.0, 3.0, 4.5, 7.0, 10.0],
         response_threshold=1.0,
@@ -304,7 +288,6 @@ def test_lab_log_detects_isoluminant_color_blob() -> None:
         min_ellipse_area=4.0,
         max_ellipse_area=500.0,
         max_axis_ratio=4.0,
-        confidence_threshold=0.0,
         response_mad_epsilon=0.01,
     )
     distance, index = nearest_keypoint(lab.us, lab.vs, 48, 45)
@@ -374,11 +357,10 @@ def make_merge_inputs(
     colors: list[tuple[float, float, float]],
     image_size: int = 24,
     matrix_value: float = 25.0,
-) -> tuple[EllipseKeypoints, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[EllipseKeypoints, np.ndarray, np.ndarray, np.ndarray]:
     height = width = image_size
     yy, xx = np.mgrid[:height, :width]
     points = np.stack([0.01 * xx, 0.01 * yy, np.ones_like(xx)], axis=-1).astype(np.float32)
-    confidence = np.ones((height, width), dtype=np.float32)
     valid = np.ones((height, width), dtype=bool)
     lab = np.zeros((height, width, 3), dtype=np.float32)
     for (u, v), color in zip(centers, colors, strict=True):
@@ -394,7 +376,7 @@ def make_merge_inputs(
         ellipse_matrices=np.repeat(matrix[None], len(centers), axis=0),
         ellipse_areas=np.full((len(centers),), matrix_value * np.pi, dtype=np.float32),
     )
-    return candidates, lab, points, confidence, valid
+    return candidates, lab, points, valid
 
 
 def gaussian_blob(

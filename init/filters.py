@@ -12,23 +12,29 @@ from .pca import PCAResult
 class PCAFilterConfig:
     scale_min: float
     scale_max: float
-    condition_max: float
+    min_secondary_eigenvalue_ratio: float
 
     def __post_init__(self) -> None:
-        values = (self.scale_min, self.scale_max, self.condition_max)
+        values = (
+            self.scale_min,
+            self.scale_max,
+            self.min_secondary_eigenvalue_ratio,
+        )
         if not np.isfinite(values).all():
             raise ValueError("PCA filter bounds must be finite")
         if self.scale_min <= 0.0 or self.scale_max < self.scale_min:
             raise ValueError("PCA scale bounds must satisfy 0 < scale_min <= scale_max")
-        if self.condition_max < 1.0:
-            raise ValueError("PCA condition_max must be at least one")
+        if not 0.0 < self.min_secondary_eigenvalue_ratio <= 1.0:
+            raise ValueError("PCA min_secondary_eigenvalue_ratio must lie in (0, 1]")
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "PCAFilterConfig":
         return cls(
             scale_min=float(config.get("scale_min", 1.0e-5)),
             scale_max=float(config.get("scale_max", 1.0)),
-            condition_max=float(config.get("condition_max", 10000.0)),
+            min_secondary_eigenvalue_ratio=float(
+                config.get("min_secondary_eigenvalue_ratio", 0.01)
+            ),
         )
 
 
@@ -43,8 +49,13 @@ def valid_pca(result: PCAResult, config: PCAFilterConfig) -> bool:
     scales = result.scales
     if not np.isfinite(scales).all():
         return False
-    if np.any(scales < config.scale_min):
+    # A surface patch is expected to have two supported tangent directions and
+    # may legitimately be arbitrarily thin along its normal. Therefore the
+    # lower scale bound applies to the secondary tangent scale, not the normal
+    # scale. The eigenvalue ratio rejects only rank-one/line-like fits.
+    if scales[1] < config.scale_min:
         return False
-    if np.any(scales > config.scale_max):
+    if scales[0] > config.scale_max:
         return False
-    return result.condition_number <= config.condition_max
+    secondary_ratio = float(result.eigenvalues[1]) / float(result.eigenvalues[0])
+    return secondary_ratio >= config.min_secondary_eigenvalue_ratio

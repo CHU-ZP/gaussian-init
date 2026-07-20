@@ -75,6 +75,22 @@ wheels = [
 ]
 
 [[package]]
+name = "cuda-toolkit"
+version = "12.1.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/5e/3e0dcadbfa2885bb93eb89f72fa6e0daee626de6e053d93372f8364053eb/cuda_toolkit-12.1.1-py2.py3-none-any.whl", hash = "sha256:eff935a8859a6119fc618b174566a1c4e724ca6d3300c5e96b5b2fe384b659dc", size = 2217, upload-time = "2025-08-13T02:02:45.785Z" },
+]
+
+[package.optional-dependencies]
+cudart = [
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or sys_platform == 'win32'" },
+]
+curand = [
+    { name = "nvidia-curand-cu12", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or sys_platform == 'win32'" },
+]
+
+[[package]]
 name = "einops"
 version = "0.8.2"
 source = { registry = "https://pypi.org/simple" }
@@ -554,6 +570,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pycolmap-cuda12"
+version = "4.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-toolkit", extra = ["cudart", "curand"], marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or sys_platform == 'win32'" },
+    { name = "numpy", marker = "(platform_machine != 'aarch64' and sys_platform == 'linux') or sys_platform == 'win32'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/c7/cd8fa544842e419ebff0876e7ceb870c44152a2eaabf7eb584ff81029ef9/pycolmap_cuda12-4.1.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:6bfba82427d54bd43b1dc508a11ce92e8a43177d1f30ac6746e04bef4869710f", size = 62474746, upload-time = "2026-06-26T13:49:19.72Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -908,6 +936,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+colmap = [
+    { name = "pycolmap-cuda12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
@@ -922,6 +953,7 @@ requires-dist = [
     { name = "gsplat", marker = "extra == 'train'", specifier = "==1.5.3+pt23cu121", index = "https://docs.gsplat.studio/whl/pt23cu121" },
     { name = "numpy", specifier = "==1.26.1" },
     { name = "pillow", specifier = ">=9.0" },
+    { name = "pycolmap-cuda12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'colmap'", specifier = "==4.1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.31" },
@@ -934,7 +966,7 @@ requires-dist = [
     { name = "vggt", editable = "external/vggt" },
     { name = "viser", specifier = "==1.0.30" },
 ]
-provides-extras = ["dev", "train"]
+provides-extras = ["colmap", "dev", "train"]
 
 [[package]]
 name = "viser"

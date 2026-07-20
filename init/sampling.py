@@ -12,7 +12,7 @@ import numpy as np
 from .continuity import global_scene_step_scale
 from .types import EllipseKeypoints
 
-INITIALIZATION_METHOD = "multichannel_lab_log_ellipse_global_step"
+INITIALIZATION_METHOD = "dense_lab_log_ellipse_grid_region_pca"
 
 
 @dataclass(frozen=True)
@@ -86,7 +86,6 @@ class SamplingConfig:
     sigmas: tuple[float, ...] = (1.0, 1.6, 2.5, 4.0, 6.4, 10.0)
     response_threshold: float = 1.0
     max_keypoints_per_view: int = 12000
-    confidence_percentile: float = 25.0
     structure_sigma_factor: float = 1.5
     ellipse_radius_factor: float = 2.5
     min_ellipse_area: float = 12.0
@@ -104,9 +103,6 @@ class SamplingConfig:
             response_threshold=float(config.get("response_threshold", cls.response_threshold)),
             max_keypoints_per_view=int(
                 config.get("max_keypoints_per_view", cls.max_keypoints_per_view)
-            ),
-            confidence_percentile=float(
-                config.get("confidence_percentile", cls.confidence_percentile)
             ),
             structure_sigma_factor=float(
                 config.get("structure_sigma_factor", cls.structure_sigma_factor)
@@ -141,7 +137,6 @@ def detect_multiscale_keypoints(
     *,
     view_id: int,
     image: np.ndarray,
-    confidence: np.ndarray,
     world_points: np.ndarray,
     sigmas: Sequence[float],
     response_threshold: float,
@@ -151,7 +146,6 @@ def detect_multiscale_keypoints(
     min_ellipse_area: float,
     max_ellipse_area: float,
     max_axis_ratio: float,
-    confidence_threshold: float,
     chroma_weight: float = 1.0,
     response_mad_epsilon: float = 0.01,
     ellipse_merge_config: EllipseMergeConfig | None = None,
@@ -183,11 +177,9 @@ def detect_multiscale_keypoints(
     if image_values.ndim not in {2, 3}:
         raise ValueError("image must have shape [H, W] or [H, W, C]")
     image_shape = image_values.shape[:2]
-    if confidence.shape != image_shape or world_points.shape != (*image_shape, 3):
-        raise ValueError("image, confidence, and world_points must share H/W dimensions")
-    if not np.isfinite(confidence_threshold):
-        raise ValueError("confidence_threshold must be finite")
-    valid = valid_pixel_mask(confidence, world_points, confidence_threshold)
+    if world_points.shape != (*image_shape, 3):
+        raise ValueError("image and world_points must share H/W dimensions")
+    valid = valid_pixel_mask(world_points)
     if image_valid_mask is not None:
         content_valid = np.asarray(image_valid_mask, dtype=bool)
         if content_valid.shape != image_shape:
@@ -252,7 +244,6 @@ def detect_multiscale_keypoints(
         candidates,
         normalized_lab=np.moveaxis(scale_space.channel_images, 0, -1),
         world_points=world_points,
-        confidence=confidence,
         valid_mask=valid,
         config=ellipse_merge_config or EllipseMergeConfig(),
         max_keypoints=max_keypoints,
@@ -260,13 +251,8 @@ def detect_multiscale_keypoints(
     )
 
 
-def valid_pixel_mask(
-    confidence: np.ndarray,
-    world_points: np.ndarray,
-    confidence_threshold: float,
-) -> np.ndarray:
-    finite = np.isfinite(world_points).all(axis=-1)
-    return finite & np.isfinite(confidence) & (confidence >= confidence_threshold)
+def valid_pixel_mask(world_points: np.ndarray) -> np.ndarray:
+    return np.isfinite(world_points).all(axis=-1)
 
 
 def add_guard_scales(sigmas: Sequence[float]) -> tuple[float, ...]:
@@ -418,7 +404,6 @@ def merge_same_scale_ellipses(
     *,
     normalized_lab: np.ndarray,
     world_points: np.ndarray,
-    confidence: np.ndarray,
     valid_mask: np.ndarray,
     config: EllipseMergeConfig,
     max_keypoints: int,
@@ -429,13 +414,12 @@ def merge_same_scale_ellipses(
         return candidates
     lab_image = np.asarray(normalized_lab, dtype=np.float32)
     points = np.asarray(world_points, dtype=np.float32)
-    confidence_values = np.asarray(confidence, dtype=np.float32)
     valid = np.asarray(valid_mask, dtype=bool)
     image_shape = valid.shape
     if lab_image.shape != (*image_shape, 3):
         raise ValueError("normalized_lab must have shape [H, W, 3]")
-    if points.shape != (*image_shape, 3) or confidence_values.shape != image_shape:
-        raise ValueError("world_points and confidence must match the merge image shape")
+    if points.shape != (*image_shape, 3):
+        raise ValueError("world_points must match the merge image shape")
     if max_keypoints < 0:
         raise ValueError("max_keypoints must be non-negative")
     if not np.isfinite(max_axis_ratio):
@@ -463,7 +447,6 @@ def merge_same_scale_ellipses(
     )
     lab = lab_image[candidates.vs, candidates.us].astype(np.float64)
     lab *= np.asarray([100.0, 128.0, 128.0], dtype=np.float64)
-    center_confidence = confidence_values[candidates.vs, candidates.us].astype(np.float64)
     continuity_reference_scale = global_scene_step_scale(points, valid, neighbors=8)
 
     union_find = _EllipseUnionFind(len(candidates))
@@ -508,7 +491,6 @@ def merge_same_scale_ellipses(
             _merge_ellipse_component(
                 candidates,
                 combined,
-                center_confidence=center_confidence,
                 config=config,
                 max_axis_ratio=max_axis_ratio,
             )
@@ -528,7 +510,6 @@ def merge_same_scale_ellipses(
         merged = _merge_ellipse_component(
             candidates,
             component,
-            center_confidence=center_confidence,
             config=config,
             max_axis_ratio=max_axis_ratio,
         )
@@ -735,13 +716,11 @@ def _merge_ellipse_component(
     candidates: EllipseKeypoints,
     component: list[int],
     *,
-    center_confidence: np.ndarray,
     config: EllipseMergeConfig,
     max_axis_ratio: float,
 ) -> tuple[int, np.ndarray, float, float] | None:
     indices = np.asarray(component, dtype=np.int64)
     raw_weights = np.maximum(candidates.scores[indices], 1.0e-6).astype(np.float64)
-    raw_weights *= np.maximum(center_confidence[indices], 1.0e-6)
     weights = raw_weights / np.sum(raw_weights)
     centers = np.stack([candidates.us[indices], candidates.vs[indices]], axis=1).astype(np.float64)
     centroid = np.sum(centers * weights[:, None], axis=0)

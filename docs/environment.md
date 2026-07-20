@@ -15,6 +15,7 @@ Torch, CUDA wheel index, VGGT, and local package versions together.
 - Install this repository through `uv sync`.
 - Keep `external/vggt` out of the main repository history.
 - Install the pinned precompiled gsplat wheel through the project `train` extra.
+- Install the official CUDA 12 PyCOLMAP wheel through the project `colmap` extra.
 
 The Python version is recorded in:
 
@@ -58,7 +59,7 @@ From the repository root:
 ```bash
 mkdir -p external
 test -d external/vggt || git clone https://github.com/facebookresearch/vggt.git external/vggt
-uv sync --extra dev --extra train
+uv sync --extra dev --extra train --extra colmap
 uv run python scripts/verify_env.py
 ```
 
@@ -82,7 +83,7 @@ Activate the virtual environment only when you want an interactive shell:
 source .venv/bin/activate
 ```
 
-## Installing gsplat
+## Installing gsplat and PyCOLMAP
 
 Verify Torch first:
 
@@ -90,16 +91,29 @@ Verify Torch first:
 uv run python scripts/verify_env.py
 ```
 
-Install the pinned Python 3.10 / PyTorch 2.3 / CUDA 12.1 gsplat wheel into
-the same uv-managed environment:
+Install the pinned Python 3.10 / PyTorch 2.3 / CUDA 12.1 gsplat wheel and the
+official CUDA 12 PyCOLMAP wheel into the same uv-managed environment:
 
 ```bash
-uv sync --extra dev --extra train
+uv sync --extra dev --extra train --extra colmap
 ```
 
-The wheel source and exact build are recorded in `pyproject.toml` and
-`uv.lock`. A CUDA 12.x-capable NVIDIA driver is still required, but this path
+The wheel sources and exact builds are recorded in `pyproject.toml` and
+`uv.lock`. The `colmap` extra provides the importable `pycolmap` module, and the
+implemented COLMAP pipeline uses its Python API without a system-level `colmap`
+executable. A CUDA 12.x-capable NVIDIA driver is still required, but this path
 does not normally require a local CUDA compiler.
+
+To install only the reconstruction dependency:
+
+```bash
+uv sync --extra colmap
+uv run --extra colmap python -c "import pycolmap; print(pycolmap.__version__, pycolmap.has_cuda)"
+```
+
+`pycolmap-cuda12` currently supplies Linux x86_64 wheels. This repository's
+pinned full environment therefore targets Linux x86_64 servers with a CUDA 12
+compatible NVIDIA driver.
 
 ## Switching CUDA Wheel Index
 
@@ -119,7 +133,7 @@ versions together with the index URL, then regenerate the lock file:
 
 ```bash
 uv lock --upgrade
-uv sync --extra dev --extra train
+uv sync --extra dev --extra train --extra colmap
 ```
 
 Do not change only the CUDA index while keeping old Torch pins unless the

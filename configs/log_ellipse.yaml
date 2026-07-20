@@ -11,7 +11,6 @@ sampling:
   sigmas: [1.0, 1.6, 2.5, 4.0, 6.4, 10.0]
   response_threshold: 1.0
   max_keypoints_per_view: 12000
-  confidence_percentile: 25.0
   structure_sigma_factor: 1.5
   ellipse_radius_factor: 2.5
   min_ellipse_area: 12.0
@@ -26,13 +25,22 @@ sampling:
     grid_cell_factor: 5.0
     merged_area_factor_max: 1.5
     merged_area_absolute_max: 1500.0
+  grid_supplement:
+    enabled: true
+    cell_size: 12
+    min_valid_fraction: 0.6
+    color_delta_e_max: 25.0
+    boundary_continuity_fraction_min: 0.6
+    continuity_ratio_max: 3.0
+    max_component_pixels: 1500
+    convex_fill_ratio_min: 0.9
+    require_hole_free: true
 
 covariance:
   min_valid_points: 16
   min_valid_fraction: 0.6
   continuity_neighbors: 8
   continuity_ratio_max: 3.0
-  confidence_weighted: true
   device: auto
   pixel_budget: 2000000
 
@@ -40,10 +48,11 @@ pca:
   eigenvalue_epsilon: 1.0e-8
   scale_min: 1.0e-5
   scale_max: 1.0
-  condition_max: 10000.0
+  min_secondary_eigenvalue_ratio: 0.01
+  normal_thickness_step_factor: 0.25
 
 gaussian:
-  opacity: 0.1
+  opacity: 0.2
 
 fusion:
   enabled: true

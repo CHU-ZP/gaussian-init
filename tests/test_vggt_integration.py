@@ -5,10 +5,10 @@ import pytest
 import torch
 
 from gsplat_train.dataset import load_scene_data
-from init.build_init import confidence_threshold_from_percentile, validate_vggt_precision_contract
-from preprocess.export_vggt_geometry import normalize_confidence
+from init.build_init import validate_prediction_precision_contract
+from init.io import load_dense_predictions
 from preprocess.run_vggt import run_prediction_heads, validate_camera_parameters
-from scripts.view_vggt import load_vggt_view_data
+from scripts.view_vggt import load_vggt_view_data, normalize_confidence
 
 
 class _FakeVGGT:
@@ -58,26 +58,16 @@ def test_camera_validation_rejects_non_rotation() -> None:
         validate_camera_parameters(extrinsics, intrinsics)
 
 
-def test_vggt_confidence_uses_content_valid_percentile() -> None:
-    confidence = np.asarray([[[1.0, 2.0], [3.0, 100.0]]], dtype=np.float32)
-    world_points = np.zeros((1, 2, 2, 3), dtype=np.float32)
-    valid_mask = np.asarray([[[True, True], [True, False]]])
-
-    threshold = confidence_threshold_from_percentile(
-        confidence,
-        world_points,
-        valid_mask,
-        percentile=50.0,
+def test_dense_predictions_do_not_require_confidence(tmp_path) -> None:
+    predictions_path = tmp_path / "predictions.npz"
+    np.savez_compressed(
+        predictions_path,
+        world_points=np.zeros((1, 2, 3, 3), dtype=np.float32),
     )
 
-    assert threshold == 2.0
-    with pytest.raises(ValueError, match=r"\[0, 100\]"):
-        confidence_threshold_from_percentile(
-            confidence,
-            world_points,
-            valid_mask,
-            percentile=101.0,
-        )
+    predictions = load_dense_predictions(predictions_path)
+
+    assert "confidence" not in predictions
 
 
 def test_unbounded_vggt_confidence_normalizes_for_ply() -> None:
@@ -94,11 +84,11 @@ def test_incompatible_runner_predictions_are_rejected() -> None:
         "processed_images": np.zeros((1, 2, 2, 3), dtype=np.float32),
     }
     with pytest.raises(RuntimeError, match="precision contract is incompatible"):
-        validate_vggt_precision_contract(runner_output)
+        validate_prediction_precision_contract(runner_output)
 
     runner_output["precision_contract"] = np.asarray("vggt_aggregator_amp_heads_float32_v1")
     runner_output["head_dtype"] = np.asarray("float32")
-    validate_vggt_precision_contract(runner_output)
+    validate_prediction_precision_contract(runner_output)
 
 
 def test_scene_data_exposes_both_camera_directions(tmp_path) -> None:

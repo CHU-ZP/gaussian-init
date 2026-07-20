@@ -1,6 +1,0 @@
--c constraints.txt
-
-huggingface_hub
-einops
-safetensors
-opencv-python

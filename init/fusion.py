@@ -248,10 +248,9 @@ def _fuse_component(
     *,
     eigenvalue_epsilon: float,
     pca_filter: PCAFilterConfig | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, float] | None:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float] | None:
     idx = np.asarray(indices, dtype=np.int64)
-    weights = np.maximum(proposals.confidences[idx], 1.0e-6).astype(np.float64)
-    weights /= np.sum(weights)
+    weights = np.full(len(idx), 1.0 / len(idx), dtype=np.float64)
 
     cluster_means = proposals.means[idx].astype(np.float64)
     mean = np.sum(cluster_means * weights[:, None], axis=0)
@@ -277,7 +276,6 @@ def _fuse_component(
         rotation_matrix_to_quaternion(pca_result.basis),
         np.sum(proposals.sh_dc[idx] * weights[:, None], axis=0).astype(np.float32),
         float(np.sum(proposals.opacities[idx] * weights)),
-        float(np.sum(proposals.confidences[idx] * weights)),
         float(np.sum(proposals.scores[idx] * weights)),
     )
 
@@ -290,7 +288,6 @@ class _ProposalBuilder:
         self.quats: list[np.ndarray] = []
         self.sh_dc: list[np.ndarray] = []
         self.opacities: list[float] = []
-        self.confidences: list[float] = []
         self.view_ids: list[int] = []
         self.scores: list[float] = []
 
@@ -301,7 +298,6 @@ class _ProposalBuilder:
         self.quats.append(proposals.quats[index])
         self.sh_dc.append(proposals.sh_dc[index])
         self.opacities.append(float(proposals.opacities[index]))
-        self.confidences.append(float(proposals.confidences[index]))
         self.view_ids.append(int(proposals.view_ids[index]))
         self.scores.append(float(proposals.scores[index]))
 
@@ -313,7 +309,6 @@ class _ProposalBuilder:
         quat: np.ndarray,
         sh_dc: np.ndarray,
         opacity: float,
-        confidence: float,
         score: float,
     ) -> None:
         self.means.append(mean)
@@ -322,7 +317,6 @@ class _ProposalBuilder:
         self.quats.append(quat)
         self.sh_dc.append(sh_dc)
         self.opacities.append(opacity)
-        self.confidences.append(confidence)
         self.view_ids.append(-1)
         self.scores.append(score)
 
@@ -334,7 +328,6 @@ class _ProposalBuilder:
             quats=self.quats,
             sh_dc=self.sh_dc,
             opacities=self.opacities,
-            confidences=self.confidences,
             view_ids=self.view_ids,
             scores=self.scores,
         )

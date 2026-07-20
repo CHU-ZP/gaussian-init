@@ -27,14 +27,14 @@ def resolve_scene_path(scene_root: str | Path, path: str | Path) -> Path:
     return Path(scene_root) / candidate
 
 
-def load_vggt_predictions(
+def load_dense_predictions(
     path: str | Path,
     *,
     extrinsics_are_c2w: bool = True,
 ) -> dict[str, np.ndarray]:
     npz_path = Path(path)
     if not npz_path.exists():
-        raise FileNotFoundError(f"VGGT predictions not found: {npz_path}")
+        raise FileNotFoundError(f"Dense predictions not found: {npz_path}")
 
     data = np.load(npz_path)
     keys = set(data.files)
@@ -57,18 +57,12 @@ def load_vggt_predictions(
         raise ValueError("world_points must have shape [V, H, W, 3]")
 
     views, height, width, _ = world_points.shape
+    output = {"world_points": world_points}
     if "confidence" in keys:
         confidence = np.asarray(data["confidence"], dtype=np.float32)
-    else:
-        confidence = np.ones((views, height, width), dtype=np.float32)
-
-    if confidence.shape != (views, height, width):
-        raise ValueError("confidence must have shape [V, H, W]")
-
-    output = {
-        "world_points": world_points,
-        "confidence": confidence,
-    }
+        if confidence.shape != (views, height, width):
+            raise ValueError("confidence must have shape [V, H, W]")
+        output["confidence"] = confidence
     if "processed_images" in keys:
         processed_images = np.asarray(data["processed_images"], dtype=np.float32)
         if processed_images.shape != (views, height, width, 3):
@@ -90,6 +84,41 @@ def load_vggt_predictions(
         "head_frames_chunk_size",
         "precision_contract",
         "confidence_semantics",
+    ):
+        if key in keys:
+            output[key] = np.asarray(data[key])
+    return output
+
+
+def load_camera_archive(path: str | Path) -> dict[str, np.ndarray]:
+    """Load a renderer-ready camera archive that does not require dense geometry."""
+    archive_path = Path(path)
+    if not archive_path.exists():
+        raise FileNotFoundError(f"Camera archive not found: {archive_path}")
+
+    data = np.load(archive_path)
+    keys = set(data.files)
+    required = {"processed_images", "intrinsics"}
+    missing = sorted(required.difference(keys))
+    if missing:
+        raise ValueError(f"Camera archive is missing keys: {missing}")
+    if not ({"extrinsics_c2w", "extrinsics"} & keys or "extrinsics_w2c" in keys):
+        raise ValueError("Camera archive must contain c2w or w2c extrinsics")
+
+    output: dict[str, np.ndarray] = {}
+    for key in (
+        "processed_images",
+        "processed_valid_mask",
+        "intrinsics",
+        "extrinsics",
+        "extrinsics_c2w",
+        "extrinsics_w2c",
+        "image_names",
+        "source_image_names",
+        "camera_source",
+        "camera_model",
+        "reprojection_error_px",
+        "mean_reprojection_error_px",
     ):
         if key in keys:
             output[key] = np.asarray(data[key])

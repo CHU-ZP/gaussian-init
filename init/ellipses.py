@@ -10,7 +10,6 @@ from .continuity import global_scene_step_scale
 @dataclass(frozen=True)
 class EllipseCovarianceResults:
     covariances: np.ndarray
-    mean_confidences: np.ndarray
     valid_counts: np.ndarray
     support_counts: np.ndarray
     valid: np.ndarray
@@ -19,18 +18,15 @@ class EllipseCovarianceResults:
 
 def compute_covariances(
     world_points: np.ndarray,
-    confidence: np.ndarray,
     us: np.ndarray,
     vs: np.ndarray,
     ellipse_matrices: np.ndarray,
     *,
     image_valid_mask: np.ndarray | None = None,
-    confidence_threshold: float,
     min_valid_points: int,
     min_valid_fraction: float,
     continuity_neighbors: int,
     continuity_ratio_max: float,
-    confidence_weighted: bool,
     device: str,
     pixel_budget: int,
 ) -> EllipseCovarianceResults:
@@ -43,23 +39,20 @@ def compute_covariances(
     import torch
 
     points_np = np.asarray(world_points, dtype=np.float32)
-    confidence_np = np.asarray(confidence, dtype=np.float32)
     us_np = np.asarray(us, dtype=np.int64)
     vs_np = np.asarray(vs, dtype=np.int64)
     matrices_np = np.asarray(ellipse_matrices, dtype=np.float32)
     image_valid_np = (
-        np.ones(confidence_np.shape, dtype=bool)
+        np.ones(points_np.shape[:2], dtype=bool)
         if image_valid_mask is None
         else np.asarray(image_valid_mask, dtype=bool)
     )
     _validate_inputs(
         points_np,
-        confidence_np,
         us_np,
         vs_np,
         matrices_np,
         image_valid_mask=image_valid_np,
-        confidence_threshold=confidence_threshold,
         min_valid_points=min_valid_points,
         min_valid_fraction=min_valid_fraction,
         continuity_neighbors=continuity_neighbors,
@@ -68,8 +61,6 @@ def compute_covariances(
     )
     continuity_valid_np = image_valid_np.copy()
     continuity_valid_np &= np.isfinite(points_np).all(axis=-1)
-    continuity_valid_np &= np.isfinite(confidence_np)
-    continuity_valid_np &= confidence_np >= float(confidence_threshold)
     continuity_reference_scale = global_scene_step_scale(
         points_np,
         continuity_valid_np,
@@ -80,7 +71,6 @@ def compute_covariances(
     if count == 0:
         return EllipseCovarianceResults(
             covariances=np.empty((0, 3, 3), dtype=np.float32),
-            mean_confidences=np.empty((0,), dtype=np.float32),
             valid_counts=np.empty((0,), dtype=np.int64),
             support_counts=np.empty((0,), dtype=np.int64),
             valid=np.empty((0,), dtype=bool),
@@ -90,14 +80,12 @@ def compute_covariances(
     torch_device = resolve_device(device)
     height, width, _ = points_np.shape
     points = torch.as_tensor(points_np, device=torch_device)
-    confidences = torch.as_tensor(confidence_np, device=torch_device)
     us_tensor = torch.as_tensor(us_np, device=torch_device)
     vs_tensor = torch.as_tensor(vs_np, device=torch_device)
     matrices = torch.as_tensor(matrices_np, device=torch_device)
     image_valid = torch.as_tensor(image_valid_np, device=torch_device)
 
     output_covariances = np.full((count, 3, 3), np.nan, dtype=np.float32)
-    output_confidences = np.full((count,), np.nan, dtype=np.float32)
     output_valid_counts = np.zeros((count,), dtype=np.int64)
     output_support_counts = np.zeros((count,), dtype=np.int64)
     output_valid = np.zeros((count,), dtype=bool)
@@ -124,7 +112,6 @@ def compute_covariances(
             indices = torch.as_tensor(indices_np, device=torch_device)
             result = _compute_chunk(
                 points=points,
-                confidences=confidences,
                 us=us_tensor[indices],
                 vs=vs_tensor[indices],
                 matrices=matrices[indices],
@@ -132,25 +119,21 @@ def compute_covariances(
                 offsets=offsets,
                 height=height,
                 width=width,
-                confidence_threshold=confidence_threshold,
                 min_valid_points=min_valid_points,
                 min_valid_fraction=min_valid_fraction,
                 continuity_neighbors=continuity_neighbors,
                 continuity_ratio_max=continuity_ratio_max,
                 continuity_reference_scale=continuity_reference_scale,
-                confidence_weighted=confidence_weighted,
                 extent_x=int(extent_x),
                 extent_y=int(extent_y),
             )
             output_covariances[indices_np] = result[0].detach().cpu().numpy()
-            output_confidences[indices_np] = result[1].detach().cpu().numpy()
-            output_valid_counts[indices_np] = result[2].detach().cpu().numpy()
-            output_support_counts[indices_np] = result[3].detach().cpu().numpy()
-            output_valid[indices_np] = result[4].detach().cpu().numpy()
+            output_valid_counts[indices_np] = result[1].detach().cpu().numpy()
+            output_support_counts[indices_np] = result[2].detach().cpu().numpy()
+            output_valid[indices_np] = result[3].detach().cpu().numpy()
 
     return EllipseCovarianceResults(
         covariances=output_covariances,
-        mean_confidences=output_confidences,
         valid_counts=output_valid_counts,
         support_counts=output_support_counts,
         valid=output_valid,
@@ -204,7 +187,6 @@ def resolve_device(device: str):
 def _compute_chunk(
     *,
     points,
-    confidences,
     us,
     vs,
     matrices,
@@ -212,13 +194,11 @@ def _compute_chunk(
     offsets,
     height: int,
     width: int,
-    confidence_threshold: float,
     min_valid_points: int,
     min_valid_fraction: float,
     continuity_neighbors: int,
     continuity_ratio_max: float,
     continuity_reference_scale: float,
-    confidence_weighted: bool,
     extent_x: int,
     extent_y: int,
 ):
@@ -241,18 +221,12 @@ def _compute_chunk(
 
     flat_indices = torch.clamp(ys, 0, height - 1) * width + torch.clamp(xs, 0, width - 1)
     gathered_points = points.reshape(-1, 3)[flat_indices]
-    gathered_confidence = confidences.reshape(-1)[flat_indices]
     gathered_image_valid = image_valid.reshape(-1)[flat_indices]
     candidate = support & torch.isfinite(gathered_points).all(dim=-1)
     candidate &= gathered_image_valid
-    candidate &= torch.isfinite(gathered_confidence)
-    candidate &= gathered_confidence >= float(confidence_threshold)
     center_points = points[vs, us]
-    center_confidences = confidences[vs, us]
     center_image_valid = image_valid[vs, us]
     center_valid = torch.isfinite(center_points).all(dim=-1)
-    center_valid &= torch.isfinite(center_confidences)
-    center_valid &= center_confidences >= float(confidence_threshold)
     center_valid &= center_image_valid
 
     valid = _center_connected_component(
@@ -268,11 +242,7 @@ def _compute_chunk(
     valid_counts = valid.sum(dim=1)
     support_counts = full_support.sum(dim=1)
     clean_points = torch.where(valid[..., None], gathered_points, torch.zeros_like(gathered_points))
-    if confidence_weighted:
-        raw_weights = torch.clamp(gathered_confidence, min=0.0)
-    else:
-        raw_weights = torch.ones_like(gathered_confidence)
-    weights = torch.where(valid, raw_weights, torch.zeros_like(raw_weights))
+    weights = valid.to(points.dtype)
     weight_sum = weights.sum(dim=1)
     # The Gaussian center is the keypoint scene coordinate, so estimate the
     # second moment around that same fixed center instead of a patch centroid.
@@ -284,12 +254,6 @@ def _compute_chunk(
     scatter = torch.bmm((centered * weights[..., None]).transpose(1, 2), centered)
     denominator = weight_sum
     covariances = scatter / torch.clamp(denominator, min=1.0e-20)[:, None, None]
-    mean_confidences = torch.where(
-        valid_counts > 0,
-        torch.where(valid, gathered_confidence, torch.zeros_like(gathered_confidence)).sum(dim=1)
-        / torch.clamp(valid_counts, min=1).to(points.dtype),
-        torch.full_like(weight_sum, float("nan")),
-    )
     valid_fraction = valid_counts.to(points.dtype) / torch.clamp(support_counts, min=1).to(
         points.dtype
     )
@@ -303,7 +267,7 @@ def _compute_chunk(
         covariances,
         torch.full_like(covariances, float("nan")),
     )
-    return covariances, mean_confidences, valid_counts, support_counts, accepted
+    return covariances, valid_counts, support_counts, accepted
 
 
 def _center_connected_component(
@@ -398,13 +362,11 @@ def _rectangle_offsets(extent_x: int, extent_y: int, device):
 
 def _validate_inputs(
     world_points: np.ndarray,
-    confidence: np.ndarray,
     us: np.ndarray,
     vs: np.ndarray,
     ellipse_matrices: np.ndarray,
     *,
     image_valid_mask: np.ndarray,
-    confidence_threshold: float,
     min_valid_points: int,
     min_valid_fraction: float,
     continuity_neighbors: int,
@@ -413,9 +375,7 @@ def _validate_inputs(
 ) -> None:
     if world_points.ndim != 3 or world_points.shape[-1] != 3:
         raise ValueError("world_points must have shape [H, W, 3]")
-    if confidence.shape != world_points.shape[:2]:
-        raise ValueError("confidence must have shape [H, W]")
-    if image_valid_mask.shape != confidence.shape:
+    if image_valid_mask.shape != world_points.shape[:2]:
         raise ValueError("image_valid_mask must have shape [H, W]")
     count = len(us)
     if us.shape != (count,) or vs.shape != (count,):
@@ -423,7 +383,7 @@ def _validate_inputs(
     if ellipse_matrices.shape != (count, 2, 2):
         raise ValueError("ellipse_matrices must have shape [N, 2, 2]")
     if count:
-        height, width = confidence.shape
+        height, width = world_points.shape[:2]
         if np.any(us < 0) or np.any(us >= width) or np.any(vs < 0) or np.any(vs >= height):
             raise ValueError("ellipse centers must lie inside the image")
         matrices64 = ellipse_matrices.astype(np.float64)
@@ -437,8 +397,6 @@ def _validate_inputs(
         raise ValueError("min_valid_points must be at least two")
     if not 0.0 <= min_valid_fraction <= 1.0:
         raise ValueError("min_valid_fraction must lie in [0, 1]")
-    if not np.isfinite(confidence_threshold):
-        raise ValueError("confidence_threshold must be finite")
     if continuity_neighbors not in {4, 8}:
         raise ValueError("continuity_neighbors must be 4 or 8")
     if not np.isfinite(continuity_ratio_max) or continuity_ratio_max < 1.0:

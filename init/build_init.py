@@ -10,15 +10,17 @@ from .ellipses import compute_covariances
 from .filters import PCAFilterConfig, valid_pca
 from .fusion import FusionConfig, similarity_graph_fuse
 from .gaussian_params import rgb_to_sh_dc, rotation_matrix_to_quaternion, sh_dc_to_rgb
+from .grid_supplement import GridSupplementConfig, build_grid_supplement
 from .io import (
     load_config,
     load_images,
-    load_vggt_predictions,
+    load_dense_predictions,
     resolve_scene_path,
     save_gaussians,
     write_ply,
 )
-from .pca import decompose_covariance
+from .pca import decompose_covariance, floor_normal_scale
+from .regions import ellipse_regions, fit_regions
 from .sampling import INITIALIZATION_METHOD, SamplingConfig, detect_multiscale_keypoints
 from .types import GaussianProposals
 
@@ -46,10 +48,9 @@ def build_gaussian_initialization(
         output_override or scene_cfg.get("output_path", "init/fused_gaussians.pt"),
     )
 
-    predictions = load_vggt_predictions(predictions_path)
-    validate_vggt_precision_contract(predictions)
+    predictions = load_dense_predictions(predictions_path)
+    validate_prediction_precision_contract(predictions)
     world_points = predictions["world_points"]
-    confidence = predictions["confidence"]
     views, height, width, _ = world_points.shape
     images = load_scene_images(
         scene_root,
@@ -68,30 +69,32 @@ def build_gaussian_initialization(
     )
 
     sampling = SamplingConfig.from_mapping(config.get("sampling"))
+    grid_supplement = GridSupplementConfig.from_mapping(
+        config.get("sampling", {}).get("grid_supplement")
+    )
     covariance_cfg = config.get("covariance", {})
     pca_cfg = config.get("pca", {})
     gaussian_cfg = config.get("gaussian", {})
     fusion = FusionConfig.from_mapping(config.get("fusion"))
     eigenvalue_epsilon = float(pca_cfg.get("eigenvalue_epsilon", 1.0e-8))
     pca_filter = PCAFilterConfig.from_config(pca_cfg)
-    opacity = float(gaussian_cfg.get("opacity", 0.1))
+    normal_thickness_step_factor = float(
+        pca_cfg.get("normal_thickness_step_factor", 0.25)
+    )
+    if (
+        not np.isfinite(normal_thickness_step_factor)
+        or normal_thickness_step_factor < 0.0
+    ):
+        raise ValueError("pca.normal_thickness_step_factor must be finite and non-negative")
+    opacity = float(gaussian_cfg.get("opacity", 0.2))
     if not np.isfinite(opacity) or not 0.0 < opacity < 1.0:
         raise ValueError("gaussian.opacity must lie strictly between zero and one")
-    confidence_percentile = sampling.confidence_percentile
-    confidence_threshold = confidence_threshold_from_percentile(
-        confidence,
-        world_points,
-        image_valid_masks,
-        percentile=confidence_percentile,
-    )
-
     means: list[np.ndarray] = []
     covariances: list[np.ndarray] = []
     scales: list[np.ndarray] = []
     quats: list[np.ndarray] = []
     sh_dc: list[np.ndarray] = []
     opacities: list[float] = []
-    confidences: list[float] = []
     view_ids: list[int] = []
     scores: list[float] = []
 
@@ -100,11 +103,26 @@ def build_gaussian_initialization(
         "image_height": height,
         "image_width": width,
         "detected_keypoints": 0,
+        "ellipse_regions": 0,
+        "grid_candidate_cells": 0,
+        "grid_merged_cells": 0,
+        "grid_shape_rejected_merges": 0,
+        "grid_regions": 0,
+        "total_regions": 0,
+        "ellipse_covered_pixels": 0,
+        "grid_support_pixels": 0,
+        "valid_image_pixels": 0,
         "accepted_proposals": 0,
+        "accepted_ellipse_proposals": 0,
+        "accepted_grid_proposals": 0,
         "rejected_covariance": 0,
+        "rejected_covariance_ellipse": 0,
+        "rejected_covariance_grid": 0,
         "rejected_pca": 0,
-        "confidence_percentile": confidence_percentile,
-        "confidence_threshold_value": confidence_threshold,
+        "rejected_pca_ellipse": 0,
+        "rejected_pca_grid": 0,
+        "grid_normal_thickness_floored": 0,
+        "normal_thickness_step_factor": normal_thickness_step_factor,
         "continuity_reference_scales": [],
     }
 
@@ -112,7 +130,6 @@ def build_gaussian_initialization(
         keypoints = detect_multiscale_keypoints(
             view_id=view,
             image=images[view],
-            confidence=confidence[view],
             world_points=world_points[view],
             sigmas=sampling.sigmas,
             response_threshold=sampling.response_threshold,
@@ -122,39 +139,67 @@ def build_gaussian_initialization(
             min_ellipse_area=sampling.min_ellipse_area,
             max_ellipse_area=sampling.max_ellipse_area,
             max_axis_ratio=sampling.max_axis_ratio,
-            confidence_threshold=confidence_threshold,
             chroma_weight=sampling.chroma_weight,
             response_mad_epsilon=sampling.response_mad_epsilon,
             ellipse_merge_config=sampling.ellipse_merge,
             image_valid_mask=image_valid_masks[view],
         )
         stats["detected_keypoints"] += len(keypoints)
-        covariance_results = compute_covariances(
+        view_ellipse_regions = ellipse_regions(keypoints)
+        supplement = build_grid_supplement(
+            images[view],
             world_points[view],
-            confidence[view],
+            view_ellipse_regions,
+            image_valid_mask=image_valid_masks[view],
+            ellipse_min_valid_points=int(covariance_cfg.get("min_valid_points", 16)),
+            ellipse_min_valid_fraction=float(covariance_cfg.get("min_valid_fraction", 0.6)),
+            continuity_neighbors=int(covariance_cfg.get("continuity_neighbors", 8)),
+            config=grid_supplement,
+        )
+        stats["ellipse_regions"] += len(view_ellipse_regions)
+        stats["grid_candidate_cells"] += supplement.candidate_cells
+        stats["grid_merged_cells"] += supplement.merged_cells
+        stats["grid_shape_rejected_merges"] += supplement.shape_rejected_merges
+        stats["grid_regions"] += len(supplement.regions)
+        stats["total_regions"] += len(view_ellipse_regions) + len(supplement.regions)
+        stats["ellipse_covered_pixels"] += supplement.covered_pixels
+        stats["grid_support_pixels"] += sum(
+            region.support_count for region in supplement.regions
+        )
+        stats["valid_image_pixels"] += supplement.valid_pixels
+
+        ellipse_results = compute_covariances(
+            world_points[view],
             keypoints.us,
             keypoints.vs,
             keypoints.ellipse_matrices,
             image_valid_mask=image_valid_masks[view],
-            confidence_threshold=confidence_threshold,
             min_valid_points=int(covariance_cfg.get("min_valid_points", 16)),
             min_valid_fraction=float(covariance_cfg.get("min_valid_fraction", 0.6)),
             continuity_neighbors=int(covariance_cfg.get("continuity_neighbors", 8)),
             continuity_ratio_max=float(covariance_cfg.get("continuity_ratio_max", 3.0)),
-            confidence_weighted=bool(covariance_cfg.get("confidence_weighted", True)),
             device=str(covariance_cfg.get("device", "auto")),
             pixel_budget=int(covariance_cfg.get("pixel_budget", 2_000_000)),
         )
-        stats["continuity_reference_scales"].append(covariance_results.continuity_reference_scale)
-        stats["rejected_covariance"] += int(np.count_nonzero(~covariance_results.valid))
+        stats["continuity_reference_scales"].append(
+            ellipse_results.continuity_reference_scale
+        )
+        rejected_ellipse_covariance = int(np.count_nonzero(~ellipse_results.valid))
+        stats["rejected_covariance"] += rejected_ellipse_covariance
+        stats["rejected_covariance_ellipse"] += rejected_ellipse_covariance
 
-        for index in np.flatnonzero(covariance_results.valid):
+        # Ellipse proposals use the keypoint
+        # scene coordinate and RGB are the Gaussian center and SH color, and the
+        # covariance is the second moment of its center-connected 3D component
+        # around that fixed keypoint center.
+        for index in np.flatnonzero(ellipse_results.valid):
             pca_result = decompose_covariance(
-                covariance_results.covariances[index],
+                ellipse_results.covariances[index],
                 eigenvalue_epsilon=eigenvalue_epsilon,
             )
             if not valid_pca(pca_result, pca_filter):
                 stats["rejected_pca"] += 1
+                stats["rejected_pca_ellipse"] += 1
                 continue
 
             u = int(keypoints.us[index])
@@ -165,9 +210,64 @@ def build_gaussian_initialization(
             quats.append(rotation_matrix_to_quaternion(pca_result.basis))
             sh_dc.append(rgb_to_sh_dc(images[view, v, u]))
             opacities.append(opacity)
-            confidences.append(float(covariance_results.mean_confidences[index]))
             view_ids.append(view)
             scores.append(float(keypoints.scores[index]))
+            stats["accepted_ellipse_proposals"] += 1
+
+        # Grid supplements have no keypoint. Fit their largest connected 3D
+        # component around its own centroid, then append the resulting
+        # proposals without changing any ellipse proposal above.
+        grid_results = fit_regions(
+            world_points[view],
+            supplement.regions,
+            colors=images[view],
+            image_valid_mask=image_valid_masks[view],
+            min_valid_points=int(covariance_cfg.get("min_valid_points", 16)),
+            min_valid_fraction=float(covariance_cfg.get("min_valid_fraction", 0.6)),
+            continuity_neighbors=int(covariance_cfg.get("continuity_neighbors", 8)),
+            continuity_ratio_max=float(covariance_cfg.get("continuity_ratio_max", 3.0)),
+            device=str(covariance_cfg.get("device", "auto")),
+            pixel_budget=int(covariance_cfg.get("pixel_budget", 2_000_000)),
+        )
+        rejected_grid_covariance = int(np.count_nonzero(~grid_results.valid))
+        stats["rejected_covariance"] += rejected_grid_covariance
+        stats["rejected_covariance_grid"] += rejected_grid_covariance
+
+        for index in np.flatnonzero(grid_results.valid):
+            pca_result = decompose_covariance(
+                grid_results.covariances[index],
+                eigenvalue_epsilon=eigenvalue_epsilon,
+            )
+            if not valid_pca(pca_result, pca_filter):
+                stats["rejected_pca"] += 1
+                stats["rejected_pca_grid"] += 1
+                continue
+
+            minimum_normal_scale = pca_filter.scale_min
+            if np.isfinite(grid_results.continuity_reference_scale):
+                minimum_normal_scale = max(
+                    minimum_normal_scale,
+                    normal_thickness_step_factor
+                    * float(grid_results.continuity_reference_scale),
+                )
+            raw_normal_scale = float(pca_result.scales[-1])
+            pca_result = floor_normal_scale(
+                pca_result,
+                minimum_scale=minimum_normal_scale,
+            )
+            if float(pca_result.scales[-1]) > raw_normal_scale:
+                stats["grid_normal_thickness_floored"] += 1
+
+            region = supplement.regions[index]
+            means.append(grid_results.means[index])
+            covariances.append(pca_result.covariance)
+            scales.append(pca_result.scales)
+            quats.append(rotation_matrix_to_quaternion(pca_result.basis))
+            sh_dc.append(rgb_to_sh_dc(grid_results.mean_colors[index]))
+            opacities.append(opacity)
+            view_ids.append(view)
+            scores.append(region.score)
+            stats["accepted_grid_proposals"] += 1
 
     proposals = GaussianProposals.from_lists(
         means=means,
@@ -176,15 +276,18 @@ def build_gaussian_initialization(
         quats=quats,
         sh_dc=sh_dc,
         opacities=opacities,
-        confidences=confidences,
         view_ids=view_ids,
         scores=scores,
     )
     stats["accepted_proposals"] = len(proposals)
+    stats["ellipse_coverage_fraction"] = stats["ellipse_covered_pixels"] / max(
+        stats["valid_image_pixels"], 1
+    )
+    stats["grid_supplement_enabled"] = grid_supplement.enabled
     if len(proposals) == 0:
         raise RuntimeError(
-            "No Gaussian proposals survived LoG detection, ellipse coverage, and PCA filtering. "
-            "Check image/prediction alignment and confidence, LoG, and PCA thresholds. "
+            "No Gaussian proposals survived region coverage, 3D connectivity, and PCA filtering. "
+            "Check image/prediction alignment, finite 3D coverage, LoG, and PCA thresholds. "
             f"Stats: {stats}"
         )
     save_gaussians(
@@ -273,7 +376,7 @@ def load_scene_images(
     if processed_images is not None:
         images = np.asarray(processed_images, dtype=np.float32)
         if images.shape != (views, height, width, 3):
-            raise ValueError("processed_images are not aligned with VGGT predictions")
+            raise ValueError("processed_images are not aligned with dense predictions")
         return images
 
     image_root = resolve_scene_path(scene_root, images_dir)
@@ -285,36 +388,14 @@ def load_scene_images(
         )
     if images.shape[1:3] != (height, width):
         raise ValueError(
-            "Scene images are not pixel-aligned with VGGT predictions: "
+            "Scene images are not pixel-aligned with dense predictions: "
             f"images have {images.shape[1:3]}, predictions have {(height, width)}"
         )
     return images.astype(np.float32)
 
 
-def confidence_threshold_from_percentile(
-    confidence: np.ndarray,
-    world_points: np.ndarray,
-    image_valid_masks: np.ndarray,
-    *,
-    percentile: float,
-) -> float:
-    if not np.isfinite(percentile) or not 0.0 <= percentile <= 100.0:
-        raise ValueError("sampling.confidence_percentile must lie in [0, 100]")
-    confidence_values = np.asarray(confidence, dtype=np.float32)
-    points = np.asarray(world_points, dtype=np.float32)
-    content_valid = np.asarray(image_valid_masks, dtype=bool)
-    if confidence_values.shape != points.shape[:-1]:
-        raise ValueError("confidence and world_points must share V/H/W dimensions")
-    if content_valid.shape != confidence_values.shape:
-        raise ValueError("processed_valid_mask must match confidence V/H/W dimensions")
-    eligible = content_valid & np.isfinite(confidence_values) & np.isfinite(points).all(axis=-1)
-    if not np.any(eligible):
-        raise ValueError("VGGT predictions contain no finite, content-valid confidence values")
-    return float(np.percentile(confidence_values[eligible], percentile))
-
-
-def validate_vggt_precision_contract(predictions: dict[str, np.ndarray]) -> None:
-    """Require float32 VGGT head outputs from prediction files made by this runner."""
+def validate_prediction_precision_contract(predictions: dict[str, np.ndarray]) -> None:
+    """Validate the precision metadata emitted by this repository's VGGT runner."""
     generated_by_runner = all(
         key in predictions for key in ("model_id", "world_points_source", "processed_images")
     )
@@ -337,7 +418,6 @@ _INITIALIZATION_SECTION_KEYS = {
         "sigmas",
         "response_threshold",
         "max_keypoints_per_view",
-        "confidence_percentile",
         "structure_sigma_factor",
         "ellipse_radius_factor",
         "min_ellipse_area",
@@ -346,17 +426,23 @@ _INITIALIZATION_SECTION_KEYS = {
         "chroma_weight",
         "response_mad_epsilon",
         "ellipse_merge",
+        "grid_supplement",
     },
     "covariance": {
         "min_valid_points",
         "min_valid_fraction",
         "continuity_neighbors",
         "continuity_ratio_max",
-        "confidence_weighted",
         "device",
         "pixel_budget",
     },
-    "pca": {"eigenvalue_epsilon", "scale_min", "scale_max", "condition_max"},
+    "pca": {
+        "eigenvalue_epsilon",
+        "scale_min",
+        "scale_max",
+        "min_secondary_eigenvalue_ratio",
+        "normal_thickness_step_factor",
+    },
     "gaussian": {"opacity"},
     "fusion": {
         "enabled",
@@ -402,10 +488,30 @@ def validate_initialization_config(config: dict[str, Any]) -> None:
     if unknown_merge:
         names = ", ".join(unknown_merge)
         raise ValueError(f"Unknown sampling.ellipse_merge config key(s): {names}")
+    grid_supplement = config.get("sampling", {}).get("grid_supplement", {})
+    if not isinstance(grid_supplement, dict):
+        raise ValueError("Config section 'sampling.grid_supplement' must be a mapping")
+    allowed_grid_keys = {
+        "enabled",
+        "cell_size",
+        "min_valid_fraction",
+        "color_delta_e_max",
+        "boundary_continuity_fraction_min",
+        "continuity_ratio_max",
+        "max_component_pixels",
+        "convex_fill_ratio_min",
+        "require_hole_free",
+    }
+    unknown_grid = sorted(set(grid_supplement) - allowed_grid_keys)
+    if unknown_grid:
+        names = ", ".join(unknown_grid)
+        raise ValueError(f"Unknown sampling.grid_supplement config key(s): {names}")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build Lab LoG/ellipse PCA Gaussian parameters.")
+    parser = argparse.ArgumentParser(
+        description="Build Lab LoG/ellipse plus uncovered-grid PCA Gaussian parameters."
+    )
     parser.add_argument("--config", required=True, help="Path to a YAML config.")
     parser.add_argument("--scene-root", default=None, help="Override scene root from config.")
     parser.add_argument("--predictions", default=None, help="Override predictions npz path.")
@@ -429,7 +535,7 @@ def main() -> None:
     print(
         "Built "
         f"{len(proposals)} per-view proposals and {len(fused)} final Gaussians "
-        f"from {stats['detected_keypoints']} multi-scale keypoints."
+        f"from {stats['ellipse_regions']} ellipse and {stats['grid_regions']} grid regions."
     )
     print(f"Saved proposals: {stats['proposals_path']}")
     print(f"Saved final init: {stats['output_path']}")

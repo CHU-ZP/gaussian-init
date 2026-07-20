@@ -31,6 +31,16 @@ def main() -> None:
 
         print(f"gsplat: {getattr(gsplat, '__version__', 'unknown')}")
 
+    if importlib.util.find_spec("pycolmap") is None:
+        print("pycolmap: not installed (run uv sync --extra colmap for COLMAP)")
+    else:
+        import pycolmap
+
+        print(f"pycolmap: {pycolmap.__version__}")
+        print(f"pycolmap cuda build: {pycolmap.has_cuda}")
+        if not pycolmap.has_cuda:
+            raise SystemExit("Expected the CUDA 12 PyCOLMAP build from the colmap extra.")
+
 
 if __name__ == "__main__":
     main()

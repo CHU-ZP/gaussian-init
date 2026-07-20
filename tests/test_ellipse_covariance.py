@@ -11,8 +11,8 @@ from init.gaussian_params import (
     sh_dc_to_rgb,
 )
 from init.fusion import FusionConfig, similarity_graph_fuse
-from init.filters import PCAFilterConfig
-from init.pca import decompose_covariance
+from init.filters import PCAFilterConfig, valid_pca
+from init.pca import decompose_covariance, floor_normal_scale
 from init.types import GaussianProposals
 
 
@@ -23,7 +23,6 @@ def test_ellipse_covariance_matches_numpy_and_ignores_bounding_box_corners() -> 
         [0.1 * xx + 0.03 * yy, -0.02 * xx + 0.08 * yy, np.ones_like(xx)],
         axis=-1,
     ).astype(np.float32)
-    confidence = np.ones((height, width), dtype=np.float32)
     angle = np.deg2rad(30.0)
     rotation = np.asarray(
         [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
@@ -41,16 +40,13 @@ def test_ellipse_covariance_matches_numpy_and_ignores_bounding_box_corners() -> 
 
     results = compute_covariances(
         world_points,
-        confidence,
         np.asarray([15]),
         np.asarray([15]),
         ellipse[None],
-        confidence_threshold=0.2,
         min_valid_points=8,
         min_valid_fraction=1.0,
         continuity_neighbors=8,
         continuity_ratio_max=4.0,
-        confidence_weighted=False,
         device="cpu",
         pixel_budget=10000,
     )
@@ -64,20 +60,16 @@ def test_ellipse_covariance_matches_numpy_and_ignores_bounding_box_corners() -> 
 
 def test_covariance_rejects_clipped_support_and_invalid_ellipse() -> None:
     points = np.zeros((21, 21, 3), dtype=np.float32)
-    confidence = np.ones((21, 21), dtype=np.float32)
     ellipse = np.asarray([[[49.0, 0.0], [0.0, 49.0]]], dtype=np.float32)
     results = compute_covariances(
         points,
-        confidence,
         np.asarray([0]),
         np.asarray([0]),
         ellipse,
-        confidence_threshold=0.2,
         min_valid_points=2,
         min_valid_fraction=0.75,
         continuity_neighbors=8,
         continuity_ratio_max=4.0,
-        confidence_weighted=False,
         device="cpu",
         pixel_budget=10000,
     )
@@ -88,16 +80,13 @@ def test_covariance_rejects_clipped_support_and_invalid_ellipse() -> None:
     with np.testing.assert_raises_regex(ValueError, "positive definite"):
         compute_covariances(
             points,
-            confidence,
             np.asarray([10]),
             np.asarray([10]),
             invalid,
-            confidence_threshold=0.2,
             min_valid_points=2,
             min_valid_fraction=0.5,
             continuity_neighbors=8,
             continuity_ratio_max=4.0,
-            confidence_weighted=False,
             device="cpu",
             pixel_budget=10000,
         )
@@ -108,24 +97,20 @@ def test_covariance_keeps_only_center_connected_globally_bounded_surface() -> No
     yy, xx = np.mgrid[:height, :width]
     points = np.stack([0.2 * xx, 0.2 * yy, np.zeros_like(xx)], axis=-1).astype(np.float32)
     points[:, 7:, 2] = 20.0
-    confidence = np.ones((height, width), dtype=np.float32)
     ellipse = np.asarray([[[36.0, 0.0], [0.0, 36.0]]], dtype=np.float32)
     support = ellipse_mask((height, width), u=6, v=6, ellipse_matrix=ellipse[0])
     expected_mask = support & (xx < 7)
 
     kwargs = {
-        "confidence_threshold": 0.0,
         "min_valid_points": 2,
         "min_valid_fraction": 0.0,
         "continuity_neighbors": 8,
         "continuity_ratio_max": 4.0,
-        "confidence_weighted": False,
         "device": "cpu",
         "pixel_budget": 10000,
     }
     results = compute_covariances(
         points,
-        confidence,
         np.asarray([6]),
         np.asarray([6]),
         ellipse,
@@ -140,7 +125,6 @@ def test_covariance_keeps_only_center_connected_globally_bounded_surface() -> No
 
     scaled = compute_covariances(
         points * 37.0,
-        confidence,
         np.asarray([6]),
         np.asarray([6]),
         ellipse,
@@ -160,7 +144,6 @@ def test_global_step_limit_rejects_locally_inflated_depth_bridge() -> None:
     yy, xx = np.mgrid[:height, :width]
     points = np.stack([0.2 * xx, 0.2 * yy, np.zeros_like(xx)], axis=-1).astype(np.float32)
     points[:, 4, 2] = 20.0
-    confidence = np.ones((height, width), dtype=np.float32)
     ellipse = np.asarray([[[16.0, 0.0], [0.0, 16.0]]], dtype=np.float32)
     support = ellipse_mask((height, width), u=3, v=4, ellipse_matrix=ellipse[0])
     expected_mask = support & (xx < 4)
@@ -174,16 +157,13 @@ def test_global_step_limit_rejects_locally_inflated_depth_bridge() -> None:
 
     results = compute_covariances(
         points,
-        confidence,
         np.asarray([3]),
         np.asarray([4]),
         ellipse,
-        confidence_threshold=0.0,
         min_valid_points=2,
         min_valid_fraction=0.0,
         continuity_neighbors=8,
         continuity_ratio_max=3.0,
-        confidence_weighted=False,
         device="cpu",
         pixel_budget=10000,
     )
@@ -219,6 +199,40 @@ def test_covariance_scale_quaternion_and_sh_round_trip() -> None:
     assert np.allclose(sh_dc_to_rgb(sh_dc), rgb, atol=1.0e-7)
 
 
+def test_pca_filter_accepts_planes_and_rejects_line_like_fits() -> None:
+    config = PCAFilterConfig(
+        scale_min=1.0e-5,
+        scale_max=2.0,
+        min_secondary_eigenvalue_ratio=0.01,
+    )
+    plane = decompose_covariance(
+        np.diag(np.asarray([1.0, 0.04, 1.0e-12], dtype=np.float32)),
+        eigenvalue_epsilon=0.0,
+    )
+    line = decompose_covariance(
+        np.diag(np.asarray([1.0, 0.001, 1.0e-8], dtype=np.float32)),
+        eigenvalue_epsilon=0.0,
+    )
+    assert valid_pca(plane, config)
+    assert not valid_pca(line, config)
+
+
+def test_normal_scale_floor_preserves_tangent_eigenpairs() -> None:
+    result = decompose_covariance(
+        np.diag(np.asarray([0.09, 0.01, 1.0e-10], dtype=np.float32)),
+        eigenvalue_epsilon=0.0,
+    )
+    floored = floor_normal_scale(result, minimum_scale=0.02)
+    assert np.allclose(floored.scales, [0.3, 0.1, 0.02], atol=1.0e-7)
+    assert np.array_equal(floored.eigenvalues[:2], result.eigenvalues[:2])
+    assert np.array_equal(floored.basis, result.basis)
+    assert np.allclose(
+        floored.covariance,
+        floored.basis @ np.diag(floored.eigenvalues) @ floored.basis.T,
+        atol=1.0e-8,
+    )
+
+
 def test_single_proposal_fusion_does_not_add_regularization_twice() -> None:
     covariance = np.diag(np.asarray([0.09, 0.01, 1.0e-8], dtype=np.float32))
     pca = decompose_covariance(covariance, eigenvalue_epsilon=0.0)
@@ -229,7 +243,6 @@ def test_single_proposal_fusion_does_not_add_regularization_twice() -> None:
         quats=[rotation_matrix_to_quaternion(pca.basis)],
         sh_dc=[np.asarray([-0.4, 0.2, 0.7], dtype=np.float32)],
         opacities=[0.1],
-        confidences=[0.9],
         view_ids=[0],
         scores=[1.0],
     )
@@ -261,14 +274,17 @@ def test_fusion_falls_back_when_merged_component_fails_pca() -> None:
         ],
         sh_dc=[np.zeros(3, dtype=np.float32), np.zeros(3, dtype=np.float32)],
         opacities=[0.1, 0.1],
-        confidences=[1.0, 1.0],
         view_ids=[0, 1],
         scores=[1.0, 1.0],
     )
     result = similarity_graph_fuse(
         proposals,
         config=FusionConfig(voxel_size=4.0),
-        pca_filter=PCAFilterConfig(scale_min=1.0e-5, scale_max=1.0, condition_max=1.0e8),
+        pca_filter=PCAFilterConfig(
+            scale_min=1.0e-5,
+            scale_max=1.0,
+            min_secondary_eigenvalue_ratio=1.0e-8,
+        ),
     )
     assert len(result.gaussians) == 2
     assert np.allclose(result.gaussians.means, proposals.means)
@@ -366,7 +382,6 @@ def _fusion_proposals(
         quats=[rotation_matrix_to_quaternion(result.basis) for result in pca_results],
         sh_dc=[rgb_to_sh_dc(np.asarray(color, dtype=np.float32)) for color in colors],
         opacities=[0.1] * len(means),
-        confidences=[1.0] * len(means),
         view_ids=list(range(len(means))),
         scores=[1.0] * len(means),
     )

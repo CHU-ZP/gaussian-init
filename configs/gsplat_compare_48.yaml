@@ -1,0 +1,71 @@
+scene:
+  root: data/tnt_truck_48
+  images_dir: images
+  predictions_path: vggt/predictions.npz
+  output_path: init/fused_gaussians.pt
+
+training:
+  init_path: init/fused_gaussians.pt
+  output_dir: comparisons/log_ellipse
+  model_path: comparisons/log_ellipse/final_gaussians.pt
+  eval_output_dir: comparisons/log_ellipse/eval
+  device: cuda
+  seed: 42
+  max_steps: 30000
+  # A value <= 0 puts every view in the training set.
+  test_every: 0
+  # Shared guard: VGGT's internally constructed projection is much tighter,
+  # while aligned PINHOLE COLMAP is accepted only below one observed pixel.
+  max_reprojection_error_px: 1.0
+  sh_degree: 3
+  sh_degree_interval: 1000
+  ssim_weight: 0.2
+  random_background: false
+  log_every: 10
+  # Full checkpoints contain optimizer and densification state and are large.
+  checkpoint_every: 1000
+  lr_schedule_steps: 30000
+  means_lr_final_factor: 0.01
+  learning_rates:
+    means: 0.00016
+    scales: 0.005
+    quats: 0.001
+    opacities: 0.05
+    sh0: 0.0025
+    shN: 0.000125
+  densification:
+    enabled: true
+    max_gaussians: 600000
+    prune_opa: 0.005
+    grow_grad2d: 0.0004
+    grow_scale3d: 0.01
+    grow_scale2d: 0.05
+    prune_scale3d: 0.1
+    prune_scale2d: 0.15
+    refine_start_iter: 1000
+    refine_stop_iter: 8000
+    refine_every: 200
+    reset_every: 3000
+    pause_refine_after_reset: 200
+    absgrad: false
+    revised_opacity: false
+    verbose: true
+
+# Per-step scalar history is cheap. Full 48-view evaluation and four diagnostic
+# previews are saved every 500 optimization steps without storing optimizer state.
+benchmark:
+  enabled: true
+  history_every: 1
+  eval_every: 500
+  eval_split: all
+  preview_views: [0, 12, 24, 36]
+  evaluate_initialization: true
+
+render:
+  near_plane: 0.01
+  far_plane: 10000000000.0
+  radius_clip: 0.0
+  eps2d: 0.3
+  packed: true
+  antialiased: false
+  background: [0.0, 0.0, 0.0]

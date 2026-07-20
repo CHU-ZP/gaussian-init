@@ -11,12 +11,11 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from init.build_init import (
-    confidence_threshold_from_percentile,
     load_scene_images,
     validate_initialization_config,
-    validate_vggt_precision_contract,
+    validate_prediction_precision_contract,
 )
-from init.io import load_config, load_vggt_predictions, resolve_scene_path
+from init.io import load_config, load_dense_predictions, resolve_scene_path
 from init.sampling import SamplingConfig, detect_multiscale_keypoints
 
 
@@ -76,10 +75,9 @@ def render_ellipse_overlays(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),
     )
-    predictions = load_vggt_predictions(predictions_path)
-    validate_vggt_precision_contract(predictions)
+    predictions = load_dense_predictions(predictions_path)
+    validate_prediction_precision_contract(predictions)
     world_points = predictions["world_points"]
-    confidence = predictions["confidence"]
     views, height, width, _ = world_points.shape
     images = load_scene_images(
         scene_root,
@@ -99,13 +97,6 @@ def render_ellipse_overlays(
     selected_views = parse_view_selection(view_selection, views=views)
 
     sampling = SamplingConfig.from_mapping(config.get("sampling"))
-    confidence_percentile = sampling.confidence_percentile
-    confidence_threshold = confidence_threshold_from_percentile(
-        confidence,
-        world_points,
-        image_valid_masks,
-        percentile=confidence_percentile,
-    )
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
@@ -116,7 +107,6 @@ def render_ellipse_overlays(
         keypoints = detect_multiscale_keypoints(
             view_id=view_id,
             image=images[view_id],
-            confidence=confidence[view_id],
             world_points=world_points[view_id],
             sigmas=sampling.sigmas,
             response_threshold=sampling.response_threshold,
@@ -126,7 +116,6 @@ def render_ellipse_overlays(
             min_ellipse_area=sampling.min_ellipse_area,
             max_ellipse_area=sampling.max_ellipse_area,
             max_axis_ratio=sampling.max_axis_ratio,
-            confidence_threshold=confidence_threshold,
             chroma_weight=sampling.chroma_weight,
             response_mad_epsilon=sampling.response_mad_epsilon,
             ellipse_merge_config=sampling.ellipse_merge,
@@ -247,8 +236,6 @@ def render_ellipse_overlays(
     summary: dict[str, Any] = {
         "config": str(config.get("_config_path", "")),
         "predictions": str(predictions_path),
-        "confidence_percentile": confidence_percentile,
-        "confidence_threshold": confidence_threshold,
         "highlight_ratio": highlight_ratio,
         "view_count": len(selected_views),
         "ellipse_count": len(csv_rows),
@@ -296,7 +283,7 @@ def parse_view_selection(selection: str | None, *, views: int) -> list[int]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Draw detected Lab LoG/structure-tensor ellipses over VGGT images."
+        description="Draw detected Lab LoG/structure-tensor ellipses over aligned images."
     )
     parser.add_argument("--config", type=Path, required=True, help="Initialization YAML config.")
     parser.add_argument("--scene-root", type=Path, default=None, help="Override scene root.")

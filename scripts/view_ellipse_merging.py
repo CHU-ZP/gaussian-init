@@ -11,12 +11,11 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from init.build_init import (
-    confidence_threshold_from_percentile,
     load_scene_images,
     validate_initialization_config,
-    validate_vggt_precision_contract,
+    validate_prediction_precision_contract,
 )
-from init.io import load_config, load_vggt_predictions, resolve_scene_path
+from init.io import load_config, load_dense_predictions, resolve_scene_path
 from init.sampling import (
     INITIALIZATION_METHOD,
     SamplingConfig,
@@ -80,10 +79,9 @@ def render_ellipse_merging(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),
     )
-    predictions = load_vggt_predictions(predictions_path)
-    validate_vggt_precision_contract(predictions)
+    predictions = load_dense_predictions(predictions_path)
+    validate_prediction_precision_contract(predictions)
     world_points = predictions["world_points"]
-    confidence = predictions["confidence"]
     views, height, width, _ = world_points.shape
     images = load_scene_images(
         scene_root,
@@ -106,13 +104,6 @@ def render_ellipse_merging(
     sampling = SamplingConfig.from_mapping(config.get("sampling"))
     sigma_values = sampling.sigmas
     response_threshold = sampling.response_threshold
-    confidence_percentile = sampling.confidence_percentile
-    confidence_threshold = confidence_threshold_from_percentile(
-        confidence,
-        world_points,
-        image_valid_masks,
-        percentile=confidence_percentile,
-    )
 
     destination = Path(output_dir)
     destination.mkdir(parents=True, exist_ok=True)
@@ -122,7 +113,7 @@ def render_ellipse_merging(
     for view_id in selected_views:
         detector_image = images[view_id]
         detector_rgb = float_rgb_to_image(detector_image)
-        valid = valid_pixel_mask(confidence[view_id], world_points[view_id], confidence_threshold)
+        valid = valid_pixel_mask(world_points[view_id])
         valid &= image_valid_masks[view_id]
         scale_space = build_log_scale_space(
             detector_image,
@@ -138,10 +129,8 @@ def render_ellipse_merging(
         selected = detect_keypoints(
             view_id=view_id,
             image=detector_image,
-            confidence=confidence[view_id],
             world_points=world_points[view_id],
             image_valid_mask=image_valid_masks[view_id],
-            confidence_threshold=confidence_threshold,
             sampling=sampling,
         )
 
@@ -333,7 +322,6 @@ def render_ellipse_merging(
         "chroma_weight": sampling.chroma_weight,
         "response_mad_epsilon": sampling.response_mad_epsilon,
         "response_threshold": response_threshold,
-        "confidence_threshold": confidence_threshold,
         "ellipse_merge": {key: value for key, value in sampling.ellipse_merge.__dict__.items()},
         "legend": {
             "channel_colors": "L=yellow, a=magenta, b=cyan",

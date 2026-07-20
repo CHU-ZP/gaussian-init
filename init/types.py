@@ -28,7 +28,6 @@ class GaussianProposals:
     quats: np.ndarray
     sh_dc: np.ndarray
     opacities: np.ndarray
-    confidences: np.ndarray
     view_ids: np.ndarray
     scores: np.ndarray
 
@@ -41,7 +40,6 @@ class GaussianProposals:
             quats=np.empty((0, 4), dtype=np.float32),
             sh_dc=np.empty((0, 3), dtype=np.float32),
             opacities=np.empty((0,), dtype=np.float32),
-            confidences=np.empty((0,), dtype=np.float32),
             view_ids=np.empty((0,), dtype=np.int64),
             scores=np.empty((0,), dtype=np.float32),
         )
@@ -55,7 +53,6 @@ class GaussianProposals:
         quats: list[np.ndarray],
         sh_dc: list[np.ndarray],
         opacities: list[float],
-        confidences: list[float],
         view_ids: list[int],
         scores: list[float],
     ) -> "GaussianProposals":
@@ -68,7 +65,6 @@ class GaussianProposals:
             quats=np.asarray(quats, dtype=np.float32),
             sh_dc=np.asarray(sh_dc, dtype=np.float32),
             opacities=np.asarray(opacities, dtype=np.float32),
-            confidences=np.asarray(confidences, dtype=np.float32),
             view_ids=np.asarray(view_ids, dtype=np.int64),
             scores=np.asarray(scores, dtype=np.float32),
         )
@@ -86,7 +82,6 @@ class GaussianProposals:
             "opacities": torch.from_numpy(np.asarray(self.opacities, dtype=np.float32)),
             "sh_dc": torch.from_numpy(np.asarray(self.sh_dc, dtype=np.float32)),
             "covariances": torch.from_numpy(np.asarray(self.covariances, dtype=np.float32)),
-            "confidences": torch.from_numpy(np.asarray(self.confidences, dtype=np.float32)),
             "view_ids": torch.from_numpy(np.asarray(self.view_ids, dtype=np.int64)),
             "scores": torch.from_numpy(np.asarray(self.scores, dtype=np.float32)),
         }

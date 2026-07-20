@@ -6,13 +6,43 @@ from pathlib import Path
 import numpy as np
 import viser
 
-from init.build_init import (
-    confidence_threshold_from_percentile,
-    validate_vggt_precision_contract,
-)
+from init.build_init import validate_prediction_precision_contract
 from init.gaussian_params import rotation_matrix_to_quaternion
-from init.io import load_vggt_predictions
-from preprocess.export_vggt_geometry import normalize_confidence
+from init.io import load_dense_predictions
+
+
+def normalize_confidence(confidence: np.ndarray) -> np.ndarray:
+    """Map unbounded VGGT confidence scores to a robust display range."""
+    values = np.asarray(confidence, dtype=np.float32)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("confidence must be a non-empty finite vector")
+    low, high = np.percentile(values, [1.0, 99.0])
+    if high <= low:
+        return np.ones_like(values)
+    return np.clip((values - low) / (high - low), 0.0, 1.0).astype(np.float32)
+
+
+def confidence_threshold_from_percentile(
+    confidence: np.ndarray,
+    world_points: np.ndarray,
+    content_mask: np.ndarray,
+    *,
+    percentile: float,
+) -> float:
+    """Return a display-only VGGT confidence cutoff for this viewer."""
+    if not np.isfinite(percentile) or not 0.0 <= percentile <= 100.0:
+        raise ValueError("confidence_percentile must lie in [0, 100]")
+    confidence_values = np.asarray(confidence, dtype=np.float32)
+    points = np.asarray(world_points, dtype=np.float32)
+    content_valid = np.asarray(content_mask, dtype=bool)
+    if confidence_values.shape != points.shape[:-1]:
+        raise ValueError("confidence and world_points must share V/H/W dimensions")
+    if content_valid.shape != confidence_values.shape:
+        raise ValueError("content_mask must match confidence V/H/W dimensions")
+    eligible = content_valid & np.isfinite(confidence_values) & np.isfinite(points).all(axis=-1)
+    if not np.any(eligible):
+        raise ValueError("Predictions contain no finite, content-valid confidence values")
+    return float(np.percentile(confidence_values[eligible], percentile))
 
 
 def load_vggt_view_data(
@@ -27,11 +57,11 @@ def load_vggt_view_data(
     if max_points is not None and max_points < 1:
         raise ValueError("max_points must be positive or None")
 
-    predictions = load_vggt_predictions(path)
-    validate_vggt_precision_contract(predictions)
+    predictions = load_dense_predictions(path)
+    validate_prediction_precision_contract(predictions)
 
     world_points = predictions["world_points"]
-    confidence = predictions["confidence"]
+    confidence = predictions.get("confidence")
     views, height, width, _ = world_points.shape
     content_mask = np.asarray(
         predictions.get(
@@ -40,19 +70,21 @@ def load_vggt_view_data(
         ),
         dtype=bool,
     )
-    confidence_threshold = confidence_threshold_from_percentile(
-        confidence,
-        world_points,
-        content_mask,
-        percentile=confidence_percentile,
-    )
-
     points_map = world_points[:, ::stride, ::stride]
-    confidence_map = confidence[:, ::stride, ::stride]
     valid = content_mask[:, ::stride, ::stride]
     valid &= np.isfinite(points_map).all(axis=-1)
-    valid &= np.isfinite(confidence_map)
-    valid &= confidence_map >= confidence_threshold
+    confidence_map = None
+    confidence_threshold = None
+    if confidence is not None:
+        confidence_threshold = confidence_threshold_from_percentile(
+            confidence,
+            world_points,
+            content_mask,
+            percentile=confidence_percentile,
+        )
+        confidence_map = confidence[:, ::stride, ::stride]
+        valid &= np.isfinite(confidence_map)
+        valid &= confidence_map >= confidence_threshold
 
     images = predictions.get("processed_images")
     if images is not None:
@@ -60,17 +92,20 @@ def load_vggt_view_data(
         valid &= np.isfinite(color_map).all(axis=-1)
         colors = np.clip(color_map[valid] * 255.0, 0.0, 255.0).astype(np.uint8)
     else:
-        selected_confidence = confidence_map[valid]
-        colors = np.repeat(
-            (normalize_confidence(selected_confidence) * 255.0).astype(np.uint8)[:, None],
-            3,
-            axis=1,
-        )
+        if confidence_map is None:
+            colors = np.full((int(np.count_nonzero(valid)), 3), 192, dtype=np.uint8)
+        else:
+            selected_confidence = confidence_map[valid]
+            colors = np.repeat(
+                (normalize_confidence(selected_confidence) * 255.0).astype(np.uint8)[:, None],
+                3,
+                axis=1,
+            )
 
     points = points_map[valid].astype(np.float32)
     if points.shape[0] == 0:
         raise ValueError(
-            "No VGGT points remain after applying the content mask, confidence filter, "
+            "No VGGT points remain after applying the content/finite-geometry mask "
             "and spatial stride"
         )
 
@@ -90,8 +125,9 @@ def load_vggt_view_data(
         "colors": colors,
         "scene_center": scene_center,
         "scene_scale": scene_scale,
-        "confidence_threshold": confidence_threshold,
     }
+    if confidence_threshold is not None:
+        output["confidence_threshold"] = confidence_threshold
     if images is not None:
         output["images"] = np.asarray(images, dtype=np.float32)
     if "intrinsics" in predictions:
@@ -220,11 +256,12 @@ def main() -> None:
     camera_count = add_cameras(server, view_data)
 
     print(f"Loaded {points.shape[0]} VGGT points from {args.input}")
-    print(
-        "Confidence threshold: "
-        f"{float(view_data['confidence_threshold']):.6g} "
-        f"(bottom {args.confidence_percentile:g}% removed)"
-    )
+    if "confidence_threshold" in view_data:
+        print(
+            "Display-only confidence threshold: "
+            f"{float(view_data['confidence_threshold']):.6g} "
+            f"(bottom {args.confidence_percentile:g}% removed)"
+        )
     print(f"Displayed {camera_count} camera poses")
     print(f"Open http://127.0.0.1:{server.get_port()} in a browser")
     print("Drag to rotate; scroll to zoom; press Ctrl+C to stop")
