@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,25 @@ def load_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Config must be a mapping: {path}")
     return data
+
+
+def resolve_scene_root(
+    config: Mapping[str, Any],
+    scene_root_override: str | Path | None = None,
+) -> Path:
+    scene_config = config.get("scene", {})
+    if not isinstance(scene_config, Mapping):
+        raise ValueError("Config section 'scene' must be a mapping")
+
+    value = scene_root_override if scene_root_override is not None else scene_config.get("root")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(
+            "Scene root is required: pass --scene-root or set scene.root in the config"
+        )
+    try:
+        return Path(value).expanduser()
+    except TypeError as exc:
+        raise ValueError("scene.root must be a filesystem path") from exc
 
 
 def resolve_scene_path(scene_root: str | Path, path: str | Path) -> Path:

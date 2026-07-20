@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from scripts.prepare_tnt_truck import (
+    REPOSITORY_ROOT,
     extract_archive_images,
     materialize_dataset,
+    parse_args,
+    print_next_steps,
     safe_archive_path,
     select_evenly,
 )
@@ -63,3 +66,14 @@ def test_extract_select_and_materialize_truck_images(tmp_path: Path) -> None:
 def test_archive_path_rejects_traversal() -> None:
     with pytest.raises(RuntimeError, match="Unsafe path"):
         safe_archive_path("../escape.jpg")
+
+
+def test_defaults_prepare_48_images_for_vggt_518(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("sys.argv", ["prepare_tnt_truck.py"])
+
+    args = parse_args()
+    print_next_steps(args.output, args.num_images)
+
+    assert args.output == REPOSITORY_ROOT / "data" / "tnt_truck_48"
+    assert args.num_images == 48
+    assert "--max-resolution 518" in capsys.readouterr().out

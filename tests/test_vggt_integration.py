@@ -70,7 +70,7 @@ def test_dense_predictions_do_not_require_confidence(tmp_path) -> None:
     assert "confidence" not in predictions
 
 
-def test_unbounded_vggt_confidence_normalizes_for_ply() -> None:
+def test_unbounded_vggt_confidence_normalizes_for_visualization() -> None:
     normalized = normalize_confidence(np.asarray([1.0, 1.2, 1.6], dtype=np.float32))
     assert normalized[0] == 0.0
     assert normalized[-1] == 1.0

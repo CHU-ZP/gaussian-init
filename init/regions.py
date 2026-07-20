@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .continuity import global_scene_step_scale
+from .continuity import global_scene_step_scale, neighbor_offsets, paired_slices
 from .types import EllipseKeypoints
 
 
@@ -313,7 +313,7 @@ def _largest_connected_component(
 
     batch, height, width = candidate.shape
     pixel_count = height * width
-    offsets = _neighbor_offsets(continuity_neighbors)
+    offsets = neighbor_offsets(continuity_neighbors)
     reference = float(continuity_reference_scale)
     tolerance = (
         float(continuity_ratio_max) * max(reference, 1.0e-12)
@@ -322,8 +322,8 @@ def _largest_connected_component(
     )
     edge_masks = []
     for delta_y, delta_x in offsets:
-        target_y, source_y = _paired_slices(height, delta_y)
-        target_x, source_x = _paired_slices(width, delta_x)
+        target_y, source_y = paired_slices(height, delta_y)
+        target_x, source_x = paired_slices(width, delta_x)
         target_valid = candidate[:, target_y, target_x]
         source_valid = candidate[:, source_y, source_x]
         delta = points[:, source_y, source_x] - points[:, target_y, target_x]
@@ -355,21 +355,6 @@ def _largest_connected_component(
     largest_local_label = torch.argmax(counts, dim=1)
     largest_label = base[:, 0] + largest_local_label
     return candidate & (labels == largest_label[:, None, None])
-
-
-def _neighbor_offsets(neighbors: int) -> tuple[tuple[int, int], ...]:
-    cardinal = ((-1, 0), (0, -1), (0, 1), (1, 0))
-    if neighbors == 4:
-        return cardinal
-    return cardinal + ((-1, -1), (-1, 1), (1, -1), (1, 1))
-
-
-def _paired_slices(length: int, delta: int) -> tuple[slice, slice]:
-    if delta < 0:
-        return slice(-delta, length), slice(0, length + delta)
-    if delta > 0:
-        return slice(0, length - delta), slice(delta, length)
-    return slice(0, length), slice(0, length)
 
 
 def _resolve_device(device: str):

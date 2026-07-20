@@ -197,48 +197,19 @@ def detect_multiscale_keypoints(
     extrema &= valid[None, :, :]
     extrema &= np.abs(responses) >= float(response_threshold)
 
-    level_ids, vs, us = np.nonzero(extrema)
-    if len(us) == 0:
-        return _empty_keypoints()
-
-    scores = np.abs(responses[level_ids, vs, us]).astype(np.float32)
-    configured_level_ids = level_ids - 1
-    required_levels = np.unique(configured_level_ids)
-    tensor_levels = {
-        int(level): multichannel_structure_tensor(
-            scale_space.blurred_channels[:, int(level) + 1],
-            integration_sigma=structure_sigma_factor * sigma_values[int(level)],
-            valid_mask=valid,
-            channel_weights=scale_space.structure_weights,
-        )
-        for level in required_levels
-    }
-    ellipse_matrices = np.empty((len(us), 2, 2), dtype=np.float32)
-    ellipse_areas = np.empty((len(us),), dtype=np.float32)
-    for index, (u, v, level_id) in enumerate(zip(us, vs, configured_level_ids, strict=True)):
-        tensor = tensor_levels[int(level_id)][int(v), int(u)]
-        matrix, area = tensor_to_ellipse(
-            tensor,
-            sigma=sigma_values[int(level_id)],
-            radius_factor=ellipse_radius_factor,
-            min_area=min_ellipse_area,
-            max_area=max_ellipse_area,
-            max_axis_ratio=max_axis_ratio,
-        )
-        ellipse_matrices[index] = matrix
-        ellipse_areas[index] = area
-
-    candidates = EllipseKeypoints(
-        view_ids=np.full((len(us),), view_id, dtype=np.int64),
-        us=us.astype(np.int64),
-        vs=vs.astype(np.int64),
-        scores=scores,
-        sigmas=np.asarray(
-            [sigma_values[level] for level in configured_level_ids], dtype=np.float32
-        ),
-        levels=configured_level_ids,
-        ellipse_matrices=ellipse_matrices,
-        ellipse_areas=ellipse_areas,
+    candidates = build_ellipse_candidates(
+        view_id=view_id,
+        extrema=extrema[1:-1],
+        responses=responses[1:-1],
+        blurred_channels=scale_space.blurred_channels[:, 1:-1],
+        sigmas=sigma_values,
+        valid_mask=valid,
+        structure_weights=scale_space.structure_weights,
+        structure_sigma_factor=structure_sigma_factor,
+        ellipse_radius_factor=ellipse_radius_factor,
+        min_ellipse_area=min_ellipse_area,
+        max_ellipse_area=max_ellipse_area,
+        max_axis_ratio=max_axis_ratio,
     )
     return merge_same_scale_ellipses(
         candidates,
@@ -248,6 +219,86 @@ def detect_multiscale_keypoints(
         config=ellipse_merge_config or EllipseMergeConfig(),
         max_keypoints=max_keypoints,
         max_axis_ratio=max_axis_ratio,
+    )
+
+
+def build_ellipse_candidates(
+    *,
+    view_id: int,
+    extrema: np.ndarray,
+    responses: np.ndarray,
+    blurred_channels: np.ndarray,
+    sigmas: Sequence[float],
+    valid_mask: np.ndarray,
+    structure_weights: np.ndarray,
+    structure_sigma_factor: float,
+    ellipse_radius_factor: float,
+    min_ellipse_area: float,
+    max_ellipse_area: float,
+    max_axis_ratio: float,
+    levels: Sequence[int] | None = None,
+) -> EllipseKeypoints:
+    """Attach structure-tensor ellipses to already-selected scale-space extrema.
+
+    Production detection and diagnostic visualization share this function so the
+    displayed pre-merge ellipses cannot drift from the initialized proposals.
+    Inputs contain only configured scales; guard scales used for extrema testing
+    must be removed by the caller.
+    """
+    extrema_values = np.asarray(extrema, dtype=bool)
+    response_values = np.asarray(responses, dtype=np.float32)
+    blurred_values = np.asarray(blurred_channels, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool)
+    weights = np.asarray(structure_weights, dtype=np.float32)
+    sigma_values = tuple(float(value) for value in sigmas)
+    output_levels = tuple(range(len(sigma_values))) if levels is None else tuple(levels)
+
+    expected_shape = (len(sigma_values), *valid.shape)
+    if extrema_values.shape != expected_shape or response_values.shape != expected_shape:
+        raise ValueError("extrema and responses must have shape [S, H, W]")
+    if blurred_values.ndim != 4 or blurred_values.shape[1:] != expected_shape:
+        raise ValueError("blurred_channels must have shape [C, S, H, W]")
+    if weights.shape != (blurred_values.shape[0],):
+        raise ValueError("structure_weights must contain one value per channel")
+    if len(output_levels) != len(sigma_values):
+        raise ValueError("levels must contain one identifier per sigma")
+
+    local_levels, vs, us = np.nonzero(extrema_values)
+    if len(us) == 0:
+        return _empty_keypoints()
+
+    tensor_levels = {
+        int(level): multichannel_structure_tensor(
+            blurred_values[:, int(level)],
+            integration_sigma=structure_sigma_factor * sigma_values[int(level)],
+            valid_mask=valid,
+            channel_weights=weights,
+        )
+        for level in np.unique(local_levels)
+    }
+    ellipse_matrices = np.empty((len(us), 2, 2), dtype=np.float32)
+    ellipse_areas = np.empty((len(us),), dtype=np.float32)
+    for index, (u, v, local_level) in enumerate(zip(us, vs, local_levels, strict=True)):
+        matrix, area = tensor_to_ellipse(
+            tensor_levels[int(local_level)][int(v), int(u)],
+            sigma=sigma_values[int(local_level)],
+            radius_factor=ellipse_radius_factor,
+            min_area=min_ellipse_area,
+            max_area=max_ellipse_area,
+            max_axis_ratio=max_axis_ratio,
+        )
+        ellipse_matrices[index] = matrix
+        ellipse_areas[index] = area
+
+    return EllipseKeypoints(
+        view_ids=np.full((len(us),), view_id, dtype=np.int64),
+        us=us.astype(np.int64),
+        vs=vs.astype(np.int64),
+        scores=np.abs(response_values[local_levels, vs, us]).astype(np.float32),
+        sigmas=np.asarray([sigma_values[level] for level in local_levels], dtype=np.float32),
+        levels=np.asarray([output_levels[level] for level in local_levels], dtype=np.int64),
+        ellipse_matrices=ellipse_matrices,
+        ellipse_areas=ellipse_areas,
     )
 
 

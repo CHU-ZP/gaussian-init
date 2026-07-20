@@ -16,6 +16,7 @@ from .io import (
     load_images,
     load_dense_predictions,
     resolve_scene_path,
+    resolve_scene_root,
     save_gaussians,
     write_ply,
 )
@@ -35,7 +36,7 @@ def build_gaussian_initialization(
 ) -> tuple[GaussianProposals, GaussianProposals, dict[str, Any]]:
     validate_initialization_config(config)
     scene_cfg = config.get("scene", {})
-    scene_root = Path(scene_root_override or scene_cfg.get("root", "data/scene_x"))
+    scene_root = resolve_scene_root(config, scene_root_override)
     predictions_path = resolve_scene_path(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),

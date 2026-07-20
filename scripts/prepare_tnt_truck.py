@@ -47,8 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=REPOSITORY_ROOT / "data" / "tnt_truck",
-        help="Prepared scene root (default: data/tnt_truck).",
+        default=REPOSITORY_ROOT / "data" / "tnt_truck_48",
+        help="Prepared scene root (default: data/tnt_truck_48).",
     )
     parser.add_argument(
         "--download-root",
@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-images",
         type=int,
-        default=12,
+        default=48,
         help="Number of uniformly spaced frames to prepare; 0 keeps every frame.",
     )
     parser.add_argument(
@@ -374,7 +374,7 @@ def print_next_steps(output_root: Path, image_count: int) -> None:
         "uv run python -m preprocess.run_vggt "
         f"--images {shell_root}/images "
         f"--output {shell_root}/vggt/predictions.npz "
-        "--device cuda --preprocess-mode crop --max-resolution 336 "
+        "--device cuda --preprocess-mode crop --max-resolution 518 "
         "--head-frames-chunk-size 1"
     )
     print("\nBuild Gaussian initialization:")

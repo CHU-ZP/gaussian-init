@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .continuity import global_scene_step_scale
+from .continuity import global_scene_step_scale, neighbor_offsets, paired_slices
 
 
 @dataclass(frozen=True)
@@ -295,7 +295,7 @@ def _center_connected_component(
     grid_width = 2 * extent_x + 1
     grid_points = points.reshape(batch, grid_height, grid_width, 3)
     grid_candidate = candidate.reshape(batch, grid_height, grid_width)
-    offsets = _neighbor_offsets(continuity_neighbors)
+    offsets = neighbor_offsets(continuity_neighbors)
 
     tolerance = float(continuity_ratio_max) * max(
         float(continuity_reference_scale),
@@ -303,8 +303,8 @@ def _center_connected_component(
     )
     edge_masks = []
     for delta_y, delta_x in offsets:
-        target_y, source_y = _paired_slices(grid_height, delta_y)
-        target_x, source_x = _paired_slices(grid_width, delta_x)
+        target_y, source_y = paired_slices(grid_height, delta_y)
+        target_x, source_x = paired_slices(grid_width, delta_x)
         target_valid = grid_candidate[:, target_y, target_x]
         source_valid = grid_candidate[:, source_y, source_x]
         point_delta = grid_points[:, source_y, source_x] - grid_points[:, target_y, target_x]
@@ -323,8 +323,8 @@ def _center_connected_component(
     for _ in range(grid_height * grid_width):
         expanded = connected.clone()
         for (delta_y, delta_x), edge_grid in zip(offsets, edge_masks, strict=True):
-            target_y, source_y = _paired_slices(grid_height, delta_y)
-            target_x, source_x = _paired_slices(grid_width, delta_x)
+            target_y, source_y = paired_slices(grid_height, delta_y)
+            target_x, source_x = paired_slices(grid_width, delta_x)
             expanded[:, target_y, target_x] |= (
                 connected[:, source_y, source_x] & edge_grid[:, target_y, target_x]
             )
@@ -333,22 +333,6 @@ def _center_connected_component(
             break
         connected = updated
     return connected.reshape_as(candidate)
-
-
-def _neighbor_offsets(neighbors: int) -> tuple[tuple[int, int], ...]:
-    cardinal = ((-1, 0), (0, -1), (0, 1), (1, 0))
-    if neighbors == 4:
-        return cardinal
-    return cardinal + ((-1, -1), (-1, 1), (1, -1), (1, 1))
-
-
-def _paired_slices(length: int, delta: int) -> tuple[slice, slice]:
-    """Return aligned target/source slices with source = target + delta."""
-    if delta < 0:
-        return slice(-delta, length), slice(0, length + delta)
-    if delta > 0:
-        return slice(0, length - delta), slice(delta, length)
-    return slice(0, length), slice(0, length)
 
 
 def _rectangle_offsets(extent_x: int, extent_y: int, device):

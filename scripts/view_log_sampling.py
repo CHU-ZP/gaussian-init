@@ -16,7 +16,7 @@ from init.build_init import (
     validate_prediction_precision_contract,
 )
 from init.ellipses import ellipse_mask
-from init.io import load_config, load_dense_predictions, resolve_scene_path
+from init.io import load_config, load_dense_predictions, resolve_scene_path, resolve_scene_root
 from init.sampling import (
     INITIALIZATION_METHOD,
     SamplingConfig,
@@ -58,7 +58,7 @@ def render_log_sampling(
     """Render the exact blur/LoG/keypoint stages for every configured scale."""
     validate_initialization_config(config)
     scene_cfg = config.get("scene", {})
-    scene_root = Path(scene_root_override or scene_cfg.get("root", "data/scene_x"))
+    scene_root = resolve_scene_root(config, scene_root_override)
     predictions_path = resolve_scene_path(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),

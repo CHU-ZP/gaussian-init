@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from init.io import load_config, resolve_scene_path
+from init.io import load_config, resolve_scene_path, resolve_scene_root
 
 from .dataset import SceneData, load_scene_data, split_view_indices
 from .loss import masked_l1_loss, psnr, ssim
@@ -38,8 +38,7 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     training = config.get("training", {})
-    scene_cfg = config.get("scene", {})
-    scene_root = Path(args.scene_root or scene_cfg.get("root", "data/scene_x"))
+    scene_root = resolve_scene_root(config, args.scene_root)
     model_value = args.model or training.get("model_path", "gsplat/final_gaussians.pt")
     model_path = resolve_scene_path(scene_root, model_value)
     output_dir = resolve_scene_path(

@@ -1,5 +1,5 @@
 scene:
-  root: data/scene_x
+  root: data/tnt_truck_48
   images_dir: images
   predictions_path: vggt/predictions.npz
   proposals_path: init/proposals.pt

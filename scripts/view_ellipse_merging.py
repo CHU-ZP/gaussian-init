@@ -15,14 +15,13 @@ from init.build_init import (
     validate_initialization_config,
     validate_prediction_precision_contract,
 )
-from init.io import load_config, load_dense_predictions, resolve_scene_path
+from init.io import load_config, load_dense_predictions, resolve_scene_path, resolve_scene_root
 from init.sampling import (
     INITIALIZATION_METHOD,
     SamplingConfig,
+    build_ellipse_candidates,
     build_log_scale_space,
-    multichannel_structure_tensor,
     scale_space_maxima,
-    tensor_to_ellipse,
     valid_pixel_mask,
 )
 from init.types import EllipseKeypoints
@@ -74,7 +73,7 @@ def render_ellipse_merging(
     """Visualize raw candidates and the result of same-scale ellipse merging."""
     validate_initialization_config(config)
     scene_cfg = config.get("scene", {})
-    scene_root = Path(scene_root_override or scene_cfg.get("root", "data/scene_x"))
+    scene_root = resolve_scene_root(config, scene_root_override)
     predictions_path = resolve_scene_path(
         scene_root,
         predictions_override or scene_cfg.get("predictions_path", "vggt/predictions.npz"),
@@ -350,46 +349,20 @@ def build_raw_ellipse_candidates(
     structure_weights: np.ndarray,
     sampling: SamplingConfig,
 ) -> EllipseKeypoints:
-    extrema_mask = np.asarray(extrema, dtype=bool)
-    vs, us = np.nonzero(extrema_mask)
-    count = len(us)
-    if count == 0:
-        return EllipseKeypoints(
-            view_ids=np.empty((0,), dtype=np.int64),
-            us=np.empty((0,), dtype=np.int64),
-            vs=np.empty((0,), dtype=np.int64),
-            scores=np.empty((0,), dtype=np.float32),
-            sigmas=np.empty((0,), dtype=np.float32),
-            levels=np.empty((0,), dtype=np.int64),
-            ellipse_matrices=np.empty((0, 2, 2), dtype=np.float32),
-            ellipse_areas=np.empty((0,), dtype=np.float32),
-        )
-    tensor_level = multichannel_structure_tensor(
-        blurred_channels,
-        integration_sigma=sampling.structure_sigma_factor * sigma,
+    return build_ellipse_candidates(
+        view_id=view_id,
+        extrema=np.asarray(extrema, dtype=bool)[None],
+        responses=np.asarray(response, dtype=np.float32)[None],
+        blurred_channels=np.asarray(blurred_channels, dtype=np.float32)[:, None],
+        sigmas=(sigma,),
         valid_mask=valid_mask,
-        channel_weights=structure_weights,
-    )
-    matrices = np.empty((count, 2, 2), dtype=np.float32)
-    areas = np.empty((count,), dtype=np.float32)
-    for index, (u, v) in enumerate(zip(us, vs, strict=True)):
-        matrices[index], areas[index] = tensor_to_ellipse(
-            tensor_level[int(v), int(u)],
-            sigma=sigma,
-            radius_factor=sampling.ellipse_radius_factor,
-            min_area=sampling.min_ellipse_area,
-            max_area=sampling.max_ellipse_area,
-            max_axis_ratio=sampling.max_axis_ratio,
-        )
-    return EllipseKeypoints(
-        view_ids=np.full((count,), view_id, dtype=np.int64),
-        us=us.astype(np.int64),
-        vs=vs.astype(np.int64),
-        scores=np.abs(response[vs, us]).astype(np.float32),
-        sigmas=np.full((count,), sigma, dtype=np.float32),
-        levels=np.full((count,), level, dtype=np.int64),
-        ellipse_matrices=matrices,
-        ellipse_areas=areas,
+        structure_weights=structure_weights,
+        structure_sigma_factor=sampling.structure_sigma_factor,
+        ellipse_radius_factor=sampling.ellipse_radius_factor,
+        min_ellipse_area=sampling.min_ellipse_area,
+        max_ellipse_area=sampling.max_ellipse_area,
+        max_axis_ratio=sampling.max_axis_ratio,
+        levels=(level,),
     )
 
 

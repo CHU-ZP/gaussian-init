@@ -7,7 +7,13 @@ from typing import Any
 import numpy as np
 import torch
 
-from init.io import load_camera_archive, load_dense_predictions, load_images, resolve_scene_path
+from init.io import (
+    load_camera_archive,
+    load_dense_predictions,
+    load_images,
+    resolve_scene_path,
+    resolve_scene_root,
+)
 
 
 @dataclass(frozen=True)
@@ -50,7 +56,7 @@ def load_scene_data(
     validate_projection: bool = False,
 ) -> SceneData:
     scene_cfg = config.get("scene", {})
-    scene_root = Path(scene_root_override or scene_cfg.get("root", "data/scene_x"))
+    scene_root = resolve_scene_root(config, scene_root_override)
     images_dir = resolve_scene_path(scene_root, scene_cfg.get("images_dir", "images"))
     predictions_path = resolve_scene_path(
         scene_root,

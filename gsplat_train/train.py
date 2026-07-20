@@ -10,7 +10,7 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from init.io import load_config, resolve_scene_path
+from init.io import load_config, resolve_scene_path, resolve_scene_root
 
 from .benchmark import (
     EVAL_HISTORY_FIELDS,
@@ -64,7 +64,7 @@ def main() -> None:
 def train(config: dict[str, Any], *, args: argparse.Namespace) -> None:
     training = config.get("training", {})
     scene_cfg = config.get("scene", {})
-    scene_root = Path(args.scene_root or scene_cfg.get("root", "data/scene_x"))
+    scene_root = resolve_scene_root(config, args.scene_root)
     device = torch.device(args.device or training.get("device", "cuda"))
     seed = int(training.get("seed", 42))
     set_random_seed(seed)
