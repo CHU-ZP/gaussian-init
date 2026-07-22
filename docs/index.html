@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="zh-CN" data-language="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="基于像素对齐稠密三维几何的区域级各向异性 Gaussian 初始化方法。"
+    />
+    <meta name="theme-color" content="#ffffff" />
+    <meta property="og:title" content="基于稠密三维几何的多视图 Gaussian 初始化" />
+    <meta
+      property="og:description"
+      content="从二维感知区域提取连续三维表面，并通过 PCA 构造各向异性 Gaussian。"
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://chu-zp.github.io/gaussian-init/" />
+    <meta
+      property="og:image"
+      content="https://chu-zp.github.io/gaussian-init/assets/media/render-comparison-view1.webp"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="https://chu-zp.github.io/gaussian-init/" />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      try {
+        const requested = new URLSearchParams(location.search).get("lang");
+        const saved = localStorage.getItem("gaussian-init-language");
+        const language = ["zh", "en"].includes(requested)
+          ? requested
+          : saved || (navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en");
+        document.documentElement.dataset.language = language;
+        document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
+      } catch (_) {}
+    </script>
+    <link rel="stylesheet" href="assets/site.css" />
+    <script src="assets/site.js" defer></script>
+    <title>基于稠密三维几何的多视图 Gaussian 初始化</title>
+  </head>
+
+  <body>
+    <a class="skip-link" href="#main">
+      <span data-lang="zh">跳到正文</span><span data-lang="en">Skip to content</span>
+    </a>
+
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="#top" aria-label="Gaussian Init home">
+          <svg viewBox="0 0 34 34" aria-hidden="true">
+            <ellipse cx="17" cy="17" rx="13" ry="6.5" transform="rotate(-32 17 17)" />
+            <circle cx="17" cy="17" r="3" />
+          </svg>
+          <span>Gaussian Init</span>
+        </a>
+
+        <nav aria-label="Main navigation">
+          <a href="#comparison"><span data-lang="zh">实验</span><span data-lang="en">Experiments</span></a>
+          <a href="#method"><span data-lang="zh">方法</span><span data-lang="en">Method</span></a>
+          <div class="language-switch" role="group" aria-label="Language">
+            <button type="button" data-set-language="zh" aria-pressed="true">中文</button>
+            <button type="button" data-set-language="en" aria-pressed="false">EN</button>
+          </div>
+          <a class="github-link" href="https://github.com/CHU-ZP/gaussian-init" target="_blank" rel="noreferrer">
+            GitHub <span aria-hidden="true">↗</span>
+          </a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div class="hero-copy">
+          <h1 data-lang="zh">基于稠密三维几何的<br />多视图 Gaussian 初始化</h1>
+          <h1 data-lang="en">Multi-view Gaussian Initialization<br /> from Dense 3D Geometry</h1>
+          <p class="lede" data-lang="zh">
+            本文提出一种基于稠密三维几何的区域级多视图 Gaussian 初始化方法。该方法根据图像结构构造二维候选区域，
+            利用像素对齐的稠密三维几何提取相应的连续局部表面，通过 PCA 在三维空间中估计各向异性 Gaussian 参数，
+            并融合不同视图中的重复表示。实验结果表明，所提出的初始化能够有效表征场景的主要结构，
+            并提升后续优化的收敛速度与最终渲染质量。
+          </p>
+          <p class="lede" data-lang="en">
+            We present a region-level multi-view Gaussian initialization method based on dense 3D geometry.
+            The method constructs 2D candidate regions from image structure, extracts the corresponding
+            continuous local surfaces using pixel-aligned dense 3D geometry, estimates anisotropic Gaussian
+            parameters in 3D through PCA, and fuses duplicate representations across views. Experimental
+            results show that the proposed initialization effectively represents the principal scene structure
+            while improving the convergence of subsequent optimization and final rendering quality.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#comparison">
+              <span data-lang="zh">实验结果</span><span data-lang="en">Results</span>
+            </a>
+            <a
+              class="button secondary"
+              href="https://github.com/CHU-ZP/gaussian-init"
+              target="_blank"
+              rel="noreferrer"
+            ><span data-lang="zh">代码</span><span data-lang="en">Code</span> <span aria-hidden="true">↗</span></a>
+            <a
+              class="button secondary"
+              href="https://github.com/CHU-ZP/gaussian-init/blob/main/report/technical_report_en.pdf"
+              target="_blank"
+              rel="noreferrer"
+            ><span data-lang="zh">技术报告</span><span data-lang="en">Report</span> <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+
+        <dl class="hero-metrics" aria-label="Key results">
+          <div>
+            <dt>26.89 <small>dB</small></dt>
+            <dd><span data-lang="zh">30k 步 PSNR</span><span data-lang="en">PSNR at 30k steps</span></dd>
+          </div>
+          <div>
+            <dt>+3.22 <small>dB</small></dt>
+            <dd><span data-lang="zh">与 COLMAP 的 PSNR 差值</span><span data-lang="en">PSNR difference from COLMAP</span></dd>
+          </div>
+          <div>
+            <dt>12k <small>steps</small></dt>
+            <dd><span data-lang="zh">达到 25 dB 的训练步数</span><span data-lang="en">Steps to reach 25 dB</span></dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="comparison" id="comparison">
+        <div class="result-intro">
+          <h2><span data-lang="zh">实验结果</span><span data-lang="en">Experimental results</span></h2>
+        </div>
+
+        <div class="section-heading stacked-heading">
+          <div>
+            <h3><span data-lang="zh">初始 Gaussian 场景</span><span data-lang="en">Initial Gaussian scene</span></h3>
+          </div>
+          <p data-lang="zh">基于本方法，由 48 个输入视图构建的区域级初始化结果。初始构造即获得了较高质量的 Gaussian，并捕捉到场景的主要结构信息。</p>
+          <p data-lang="en">Region-level initialization constructed from 48 input views using the proposed method. The initialization already yields high-quality Gaussians that capture the principal structure of the scene.</p>
+        </div>
+
+        <figure class="video-card orbit-card">
+          <div class="media-heading">
+            <strong><span data-lang="zh">初始化结果</span><span data-lang="en">Initialization result</span></strong>
+            <span>360° orbit</span>
+          </div>
+          <video autoplay muted loop playsinline controls preload="auto">
+            <source src="assets/media/initial-gaussians-truck-orbit.mp4" type="video/mp4" />
+          </video>
+          <figcaption>
+            <span data-lang="zh">基于稠密三维几何与区域级采样构建，尚未进行优化。</span>
+            <span data-lang="en">Constructed from dense 3D geometry and region-level sampling, before optimization.</span>
+          </figcaption>
+        </figure>
+
+        <div class="section-heading stacked-heading convergence-heading">
+          <div>
+            <h3><span data-lang="zh">收敛速度对比</span><span data-lang="en">Convergence-speed comparison</span></h3>
+          </div>
+          <p data-lang="zh">采用相同的优化配置并训练 30,000 步。动画完整记录前 100 步，之后每 100 步记录一次。<small class="source-note">注：本研究使用 gsplat 进行 Gaussian 优化与渲染。</small></p>
+          <p data-lang="en">Both pipelines use the same optimization settings and train for 30,000 steps. The animation records every step through step 100 and then every 100 steps.<small class="source-note">Note: Gaussian optimization and rendering are implemented with gsplat.</small></p>
+        </div>
+
+        <div class="video-stack">
+          <figure class="video-card">
+            <div class="media-heading">
+              <strong>View 1</strong>
+              <span>0 → 30,000</span>
+            </div>
+            <video autoplay muted loop playsinline controls preload="auto">
+              <source src="assets/media/training-progress-view1.mp4" type="video/mp4" />
+            </video>
+            <figcaption>
+              <span data-lang="zh">从左到右：参考图像、本文 Pipeline、COLMAP sparse Pipeline。</span>
+              <span data-lang="en">Left to right: reference, proposed pipeline, and COLMAP sparse pipeline.</span>
+            </figcaption>
+          </figure>
+
+          <figure class="video-card">
+            <div class="media-heading">
+              <strong>View 2</strong>
+              <span>0 → 30,000</span>
+            </div>
+            <video autoplay muted loop playsinline controls preload="auto">
+              <source src="assets/media/training-progress-view2.mp4" type="video/mp4" />
+            </video>
+            <figcaption>
+              <span data-lang="zh">本研究初始化与 COLMAP sparse 初始化在相同视图上的训练过程。</span>
+              <span data-lang="en">Training trajectories of the proposed and COLMAP sparse initializations on the same view.</span>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div class="section-heading single-column result-divider">
+          <div>
+            <h3><span data-lang="zh">最终渲染对比</span><span data-lang="en">Final rendering comparison</span></h3>
+          </div>
+        </div>
+
+        <div class="final-renders">
+          <figure>
+            <img src="assets/media/target-view1.webp" alt="Reference image" loading="lazy" />
+            <figcaption><span data-lang="zh">参考图像</span><span data-lang="en">Reference image</span></figcaption>
+          </figure>
+          <figure>
+            <img src="assets/media/final-vggt-view1.webp" alt="Proposed initialization render after 30000 steps" loading="lazy" />
+            <figcaption><span data-lang="zh">本研究初始化方法 · 30k</span><span data-lang="en">Proposed initialization · 30k</span></figcaption>
+          </figure>
+          <figure>
+            <img src="assets/media/final-colmap-view1.webp" alt="COLMAP sparse initialization render after 30000 steps" loading="lazy" />
+            <figcaption><span data-lang="zh">COLMAP sparse 初始化 · 30k</span><span data-lang="en">COLMAP sparse initialization · 30k</span></figcaption>
+          </figure>
+        </div>
+
+        <div class="section-heading single-column result-divider">
+          <div>
+            <h3><span data-lang="zh">收敛曲线</span><span data-lang="en">Convergence curves</span></h3>
+          </div>
+        </div>
+
+        <figure class="chart-card results-chart">
+          <img src="assets/media/convergence-compact.webp" alt="PSNR, SSIM, and L1 convergence curves arranged in one row" loading="lazy" />
+        </figure>
+
+        <div class="checkpoint-metrics">
+          <article class="checkpoint-card">
+            <div class="checkpoint-heading"><strong>1,000 <span data-lang="zh">步</span><span data-lang="en">steps</span></strong></div>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"><span data-lang="zh">指标</span><span data-lang="en">Metric</span></th>
+                  <th scope="col"><span data-lang="zh">本文方法</span><span data-lang="en">Proposed</span></th>
+                  <th scope="col">COLMAP sparse</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">PSNR</th><td>19.59 dB</td><td>15.53 dB</td></tr>
+                <tr><th scope="row">SSIM</th><td>0.6724</td><td>0.4742</td></tr>
+                <tr><th scope="row">L1</th><td>0.0638</td><td>0.1190</td></tr>
+              </tbody>
+            </table>
+          </article>
+
+          <article class="checkpoint-card">
+            <div class="checkpoint-heading"><strong>3,000 <span data-lang="zh">步</span><span data-lang="en">steps</span></strong></div>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"><span data-lang="zh">指标</span><span data-lang="en">Metric</span></th>
+                  <th scope="col"><span data-lang="zh">本文方法</span><span data-lang="en">Proposed</span></th>
+                  <th scope="col">COLMAP sparse</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">PSNR</th><td>21.67 dB</td><td>17.10 dB</td></tr>
+                <tr><th scope="row">SSIM</th><td>0.7581</td><td>0.5123</td></tr>
+                <tr><th scope="row">L1</th><td>0.0476</td><td>0.0924</td></tr>
+              </tbody>
+            </table>
+          </article>
+        </div>
+      </section>
+
+      <section class="method" id="method">
+        <div class="section-heading compact single-column">
+          <div class="method-heading-copy">
+            <h2><span data-lang="zh">方法：区域级 Gaussian 初始化</span><span data-lang="en">Method: Region-level Gaussian initialization</span></h2>
+            <p data-lang="zh">给定多视图图像，首先使用稠密几何估计器获得像素对齐的三维点图与相机参数；随后，本文方法基于这些稠密三维几何构造区域级 Gaussian 初始化。</p>
+            <p data-lang="en">Given multi-view images, a dense geometry estimator first produces pixel-aligned 3D point maps and camera parameters. The proposed method then constructs a region-level Gaussian initialization from this dense 3D geometry.</p>
+            <small class="source-note" data-lang="zh">注：本文实验采用 VGGT。</small>
+            <small class="source-note" data-lang="en">Note: VGGT is used in our experiments.</small>
+          </div>
+        </div>
+
+        <ol class="pipeline">
+          <li>
+            <span>01</span>
+            <div>
+              <h3><span data-lang="zh">发现二维区域</span><span data-lang="en">Discover 2D regions</span></h3>
+              <p data-lang="zh">Lab 多尺度 LoG 捕捉亮度与颜色结构，规则网格补充低纹理区域。</p>
+              <p data-lang="en">Multiscale Lab-LoG captures luminance and color structure; a grid fills low-texture areas.</p>
+            </div>
+          </li>
+          <li>
+            <span>02</span>
+            <div>
+              <h3><span data-lang="zh">提取连续表面</span><span data-lang="en">Extract continuous surfaces</span></h3>
+              <p data-lang="zh">把区域内像素映射到三维，并用固定场景尺度排除深度跳变。</p>
+              <p data-lang="en">Lift pixels to 3D and reject depth discontinuities using a fixed scene-scale threshold.</p>
+            </div>
+          </li>
+          <li>
+            <span>03</span>
+            <div>
+              <h3><span data-lang="zh">拟合各向异性 Gaussian</span><span data-lang="en">Fit anisotropic Gaussians</span></h3>
+              <p data-lang="zh">PCA 直接给出局部表面的中心、主方向和三轴尺度。</p>
+              <p data-lang="en">PCA directly estimates each local surface center, orientation, and three-axis scale.</p>
+            </div>
+          </li>
+          <li>
+            <span>04</span>
+            <div>
+              <h3><span data-lang="zh">多视图融合</span><span data-lang="en">Fuse across views</span></h3>
+              <p data-lang="zh">联合比较位置、协方差、法向、尺度与颜色，只合并重复表面表示。</p>
+              <p data-lang="en">Position, covariance, normal, scale, and color jointly identify duplicate surface representations.</p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="proposal-visuals">
+          <figure>
+            <img src="assets/media/final-ellipses-view1.webp" alt="Lab-LoG structure ellipse proposals" loading="lazy" />
+            <figcaption>
+              <strong><span data-lang="zh">结构区域</span><span data-lang="en">Structure regions</span></strong>
+              <span data-lang="zh">多尺度 Lab-LoG 与自适应椭圆</span><span data-lang="en">Multiscale Lab-LoG with adaptive ellipses</span>
+            </figcaption>
+          </figure>
+          <figure>
+            <img src="assets/media/grid-supplement-view1.webp" alt="Regular-grid completion proposals" loading="lazy" />
+            <figcaption>
+              <strong><span data-lang="zh">低纹理补充</span><span data-lang="en">Low-texture completion</span></strong>
+              <span data-lang="zh">未充分覆盖网格的区域生长与合并</span><span data-lang="en">Region growing and merging over uncovered grid cells</span>
+            </figcaption>
+          </figure>
+        </div>
+
+        <div class="method-report">
+          <p data-lang="zh">关于候选区域构建、三维连续性筛选、PCA 参数化与多视图融合的完整说明，请参阅<a href="https://github.com/CHU-ZP/gaussian-init/blob/main/report/technical_report_en.pdf" target="_blank" rel="noreferrer">技术报告 <span aria-hidden="true">↗</span></a>。</p>
+          <p data-lang="en">For complete details on candidate-region construction, 3D continuity filtering, PCA parameterization, and multi-view fusion, see the <a href="https://github.com/CHU-ZP/gaussian-init/blob/main/report/technical_report_en.pdf" target="_blank" rel="noreferrer">technical report <span aria-hidden="true">↗</span></a>.</p>
+        </div>
+      </section>
+
+    </main>
+
+    <footer>
+      <span>Gaussian Init</span>
+      <span>Zepeng Chu · 2026</span>
+    </footer>
+  </body>
+</html>

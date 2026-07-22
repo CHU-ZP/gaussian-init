@@ -4,10 +4,21 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
 
 # Local data and experiment outputs can be large.
 data/*
 !data/.gitkeep
+result/
+results/
+outputs/
+runs/
+checkpoints/
+wandb/
 
 # Third-party source trees live here but are not vendored into this repo.
 external/*
@@ -19,6 +30,18 @@ external/*
 *.ckpt
 *.ply
 *.npz
+
+# LaTeX build products. Keep the public English source and PDF only.
+*.aux
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.xdv
+report/technical_report.tex
+report/technical_report.pdf
 
 # Editor/system files.
 .DS_Store

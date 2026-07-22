@@ -5,6 +5,7 @@ import csv
 import html
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--thresholds", default="25,28,30")
     parser.add_argument("--render-steps", default="0,1000,3000,8000,30000")
     parser.add_argument("--render-views", default="0,12,24,36")
+    parser.add_argument(
+        "--view-labels",
+        default=None,
+        help="Optional comma-separated output labels corresponding to --render-views.",
+    )
     return parser.parse_args()
 
 
@@ -48,6 +54,7 @@ def main() -> None:
     thresholds = parse_number_list(args.thresholds, float)
     render_steps = parse_number_list(args.render_steps, int)
     render_views = parse_number_list(args.render_views, int)
+    view_labels = parse_view_labels(args.view_labels, render_views)
 
     run_data = {name: load_run(path) for name, path in runs.items()}
     args.output.mkdir(parents=True, exist_ok=True)
@@ -58,16 +65,16 @@ def main() -> None:
         run_data,
         loss_window=args.loss_window,
     )
-    for view_id in render_views:
+    for view_id, view_label in zip(render_views, view_labels, strict=True):
         write_render_comparison(
-            args.output / f"render_comparison_view_{view_id:03d}.png",
+            args.output / f"render_comparison_{view_label}.png",
             runs,
             steps=render_steps,
             view_id=view_id,
         )
     print(f"Comparison summary: {args.output / 'summary.csv'}")
     print(f"Convergence curves: {args.output / 'convergence.svg'}")
-    print(f"Render comparisons: {args.output / 'render_comparison_view_*.png'}")
+    print(f"Render comparisons: {args.output / 'render_comparison_*.png'}")
 
 
 def parse_named_run(value: str) -> tuple[str, Path]:
@@ -82,6 +89,21 @@ def parse_named_run(value: str) -> tuple[str, Path]:
 
 def parse_number_list(value: str, conversion):
     return [conversion(item.strip()) for item in value.split(",") if item.strip()]
+
+
+def parse_view_labels(value: str | None, views: list[int]) -> list[str]:
+    labels = (
+        [f"view_{view:03d}" for view in views]
+        if value is None
+        else [item.strip() for item in value.split(",") if item.strip()]
+    )
+    if len(labels) != len(views):
+        raise ValueError("--view-labels must contain one label per render view")
+    if len(labels) != len(set(labels)):
+        raise ValueError("--view-labels must not contain duplicates")
+    if any(re.fullmatch(r"[A-Za-z0-9_-]+", label) is None for label in labels):
+        raise ValueError("View labels may contain only letters, digits, underscores, and hyphens")
+    return labels
 
 
 def load_run(path: Path) -> dict[str, Any]:
@@ -196,12 +218,11 @@ def write_convergence_svg(
     loss_window: int,
 ) -> None:
     panels = [
-        ("Training loss (moving average)", "step", "loss_smooth"),
         ("48-view PSNR", "step", "psnr"),
         ("48-view SSIM", "step", "ssim"),
         ("48-view L1", "step", "l1"),
+        ("Training loss (moving average)", "step", "loss_smooth"),
         ("Gaussian count", "step", "gaussians"),
-        ("PSNR vs optimization time", "optimization_seconds", "psnr"),
     ]
     series_by_panel: list[dict[str, tuple[list[float], list[float]]]] = []
     for _, x_key, y_key in panels:
@@ -225,12 +246,15 @@ def write_convergence_svg(
         '<text x="40" y="38" font-size="24" font-family="sans-serif" '
         'font-weight="bold">gsplat initialization comparison</text>',
     ]
+    panel_gap = 25
     for index, ((title, x_key, _), panel_series) in enumerate(
         zip(panels, series_by_panel, strict=True)
     ):
-        column = index % 3
-        row = index // 3
-        left = 35 + column * 495
+        row = 0 if index < 3 else 1
+        column = index if row == 0 else index - 3
+        columns_in_row = 3 if row == 0 else 2
+        row_width = columns_in_row * panel_width + (columns_in_row - 1) * panel_gap
+        left = (width - row_width) / 2 + column * (panel_width + panel_gap)
         top = 70 + row * 405
         elements.extend(
             svg_panel(

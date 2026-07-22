@@ -28,7 +28,7 @@ training_complete = _runner_utils.training_complete
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Retrain the VGGT strategy-sampling and COLMAP pipelines while saving "
+            "Retrain the VGGT plus region-initialization and COLMAP pipelines while saving "
             "dense fixed-view previews, then build comparison GIFs."
         )
     )
@@ -69,6 +69,7 @@ def main() -> None:
     scene_root = args.scene_root.expanduser().resolve()
     config = load_config(config_path)
     views = parse_views(args.views)
+    view_labels = [f"view{index + 1}" for index in range(len(views))]
     configured_steps = int(config.get("training", {}).get("max_steps", 30_000))
     max_steps = configured_steps if args.max_steps is None else args.max_steps
     validate_settings(
@@ -82,9 +83,7 @@ def main() -> None:
     inputs = {
         "VGGT scene archive": resolve_scene_path(scene_root, args.vggt_scene_data).resolve(),
         "VGGT initialization": resolve_scene_path(scene_root, args.vggt_init).resolve(),
-        "COLMAP scene archive": resolve_scene_path(
-            scene_root, args.colmap_scene_data
-        ).resolve(),
+        "COLMAP scene archive": resolve_scene_path(scene_root, args.colmap_scene_data).resolve(),
         "COLMAP initialization": resolve_scene_path(scene_root, args.colmap_init).resolve(),
     }
     missing = [f"{name}: {path}" for name, path in inputs.items() if not path.exists()]
@@ -100,13 +99,11 @@ def main() -> None:
             shutil.rmtree(output_root)
 
     run_dirs = {
-        "VGGT + sampling": output_root / "vggt_log_grid",
+        "VGGT + region initialization": output_root / "region_init",
         "COLMAP sparse": output_root / "colmap_sparse",
     }
     existing_config = output_root / "dense_training_config.yaml"
-    has_complete_run = any(
-        training_complete(path, max_steps) for path in run_dirs.values()
-    )
+    has_complete_run = any(training_complete(path, max_steps) for path in run_dirs.values())
     if (
         has_complete_run
         and not args.restart
@@ -148,18 +145,16 @@ def main() -> None:
         print(f"[dry-run] write derived config {generated_config}")
     else:
         output_root.mkdir(parents=True, exist_ok=True)
-        generated_config.write_text(
-            yaml.safe_dump(dense_config, sort_keys=False), encoding="utf-8"
-        )
+        generated_config.write_text(yaml.safe_dump(dense_config, sort_keys=False), encoding="utf-8")
 
     commands: list[list[str]] = []
     started = time.time()
     specs = (
         (
-            "VGGT + sampling",
+            "VGGT + region initialization",
             inputs["VGGT scene archive"],
             inputs["VGGT initialization"],
-            run_dirs["VGGT + sampling"],
+            run_dirs["VGGT + region initialization"],
         ),
         (
             "COLMAP sparse",
@@ -199,16 +194,14 @@ def main() -> None:
             stage=f"retrain {name}",
         )
         if not args.dry_run and not training_complete(run_dir, max_steps):
-            raise RuntimeError(
-                f"{name} stopped before {max_steps:,} steps. Rerun with --restart."
-            )
+            raise RuntimeError(f"{name} stopped before {max_steps:,} steps. Rerun with --restart.")
 
     report_dir = output_root / "report"
     report_command = [
         sys.executable,
         str(repository_root / "scripts" / "compare_gsplat_runs.py"),
         "--run",
-        f"vggt_log_grid={run_dirs['VGGT + sampling']}",
+        f"region_init={run_dirs['VGGT + region initialization']}",
         "--run",
         f"colmap_sparse={run_dirs['COLMAP sparse']}",
         "--output",
@@ -217,6 +210,8 @@ def main() -> None:
         ",".join(str(step) for step in comparison_steps(max_steps)),
         "--render-views",
         ",".join(str(view) for view in views),
+        "--view-labels",
+        ",".join(view_labels),
     ]
     commands.append(report_command)
     run_command(
@@ -230,13 +225,15 @@ def main() -> None:
         sys.executable,
         str(repository_root / "scripts" / "render_gsplat_progress_gif.py"),
         "--run",
-        f"VGGT + sampling={run_dirs['VGGT + sampling']}",
+        f"VGGT + region initialization={run_dirs['VGGT + region initialization']}",
         "--run",
         f"COLMAP sparse={run_dirs['COLMAP sparse']}",
         "--output-dir",
         str(report_dir),
         "--views",
         ",".join(str(view) for view in views),
+        "--view-labels",
+        ",".join(view_labels),
         "--step-every",
         str(args.preview_every),
         "--dense-first-steps",
@@ -261,6 +258,7 @@ def main() -> None:
             "eval_every": args.eval_every,
             "checkpoint_every": 0,
             "preview_views": views,
+            "preview_view_labels": dict(zip(view_labels, views, strict=True)),
             "runs": {name: str(path) for name, path in run_dirs.items()},
             "report": str(report_dir),
             "elapsed_seconds": time.time() - started,

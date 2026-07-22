@@ -7,11 +7,15 @@ from PIL import Image
 
 from scripts.compare_gsplat_runs import (
     load_run,
+    parse_view_labels as parse_report_view_labels,
     summarize_runs,
     write_convergence_svg,
     write_render_comparison,
 )
-from scripts.render_gsplat_progress_gif import select_steps
+from scripts.render_gsplat_progress_gif import (
+    parse_view_labels as parse_gif_view_labels,
+    select_steps,
+)
 
 
 def test_compare_histories_and_render_montage(tmp_path: Path) -> None:
@@ -72,7 +76,9 @@ def test_compare_histories_and_render_montage(tmp_path: Path) -> None:
 
     svg_path = tmp_path / "convergence.svg"
     write_convergence_svg(svg_path, run_data, loss_window=2)
-    assert "48-view PSNR" in svg_path.read_text(encoding="utf-8")
+    svg = svg_path.read_text(encoding="utf-8")
+    assert "48-view PSNR" in svg
+    assert "PSNR vs optimization time" not in svg
 
     montage_path = tmp_path / "comparison.png"
     write_render_comparison(montage_path, runs, steps=[0, 1000], view_id=0)
@@ -87,6 +93,14 @@ def test_dense_gif_step_schedule_keeps_warmup_then_sparse_frames() -> None:
     selected = select_steps(steps, every=100, dense_first_steps=100)
 
     assert selected == [*range(101), 200, 300]
+
+
+def test_view_labels_hide_internal_camera_indices() -> None:
+    views = [12, 36]
+
+    assert parse_report_view_labels("view1,view2", views) == ["view1", "view2"]
+    assert parse_gif_view_labels("view1,view2", views) == ["view1", "view2"]
+    assert parse_report_view_labels(None, views) == ["view_012", "view_036"]
 
 
 def write_csv(path: Path, rows: list[dict]) -> None:

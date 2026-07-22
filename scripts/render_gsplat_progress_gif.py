@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,11 @@ def parse_args() -> argparse.Namespace:
         "--views",
         default="12,36",
         help="Comma-separated benchmark view ids.",
+    )
+    parser.add_argument(
+        "--view-labels",
+        default=None,
+        help="Optional comma-separated output labels corresponding to --views.",
     )
     parser.add_argument(
         "--step-every",
@@ -59,6 +65,7 @@ def main() -> None:
     if len(runs) < 2:
         raise ValueError("At least two distinct --run values are required")
     views = parse_views(args.views)
+    view_labels = parse_view_labels(args.view_labels, views)
     histories = {name: load_eval_history(path) for name, path in runs.items()}
     steps = shared_render_steps(runs, views)
     selected_steps = select_steps(
@@ -70,14 +77,15 @@ def main() -> None:
         raise FileNotFoundError("No shared benchmark render steps were found")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    for view_id in views:
-        output = args.output_dir / f"training_progress_view_{view_id:03d}.gif"
+    for view_id, view_label in zip(views, view_labels, strict=True):
+        output = args.output_dir / f"training_progress_{view_label}.gif"
         write_progress_gif(
             output,
             runs=runs,
             histories=histories,
             steps=selected_steps,
             view_id=view_id,
+            view_label=view_label,
             cell_width=args.cell_width,
             duration_ms=args.duration_ms,
             final_duration_ms=args.final_duration_ms,
@@ -104,6 +112,21 @@ def parse_views(value: str) -> list[int]:
     return views
 
 
+def parse_view_labels(value: str | None, views: list[int]) -> list[str]:
+    labels = (
+        [f"view_{view:03d}" for view in views]
+        if value is None
+        else [item.strip() for item in value.split(",") if item.strip()]
+    )
+    if len(labels) != len(views):
+        raise ValueError("--view-labels must contain one label per view")
+    if len(labels) != len(set(labels)):
+        raise ValueError("--view-labels must not contain duplicates")
+    if any(re.fullmatch(r"[A-Za-z0-9_-]+", label) is None for label in labels):
+        raise ValueError("View labels may contain only letters, digits, underscores, and hyphens")
+    return labels
+
+
 def load_eval_history(run: Path) -> dict[int, dict[str, float]]:
     path = run / "eval_history.csv"
     if not path.exists():
@@ -128,13 +151,9 @@ def shared_render_steps(runs: dict[str, Path], views: list[int]) -> list[int]:
     return sorted(shared or set())
 
 
-def select_steps(
-    steps: list[int], *, every: int, dense_first_steps: int = 0
-) -> list[int]:
+def select_steps(steps: list[int], *, every: int, dense_first_steps: int = 0) -> list[int]:
     selected = [
-        step
-        for step in steps
-        if step <= dense_first_steps or step == 0 or step % every == 0
+        step for step in steps if step <= dense_first_steps or step == 0 or step % every == 0
     ]
     if steps and steps[-1] not in selected:
         selected.append(steps[-1])
@@ -148,6 +167,7 @@ def write_progress_gif(
     histories: dict[str, dict[int, dict[str, float]]],
     steps: list[int],
     view_id: int,
+    view_label: str | None = None,
     cell_width: int,
     duration_ms: int,
     final_duration_ms: int,
@@ -164,6 +184,7 @@ def write_progress_gif(
             step=step,
             final_step=steps[-1],
             view_id=view_id,
+            view_label=view_label,
             cell_width=cell_width,
             cell_height=cell_height,
         ).quantize(colors=256, method=Image.Quantize.MEDIANCUT)
@@ -189,6 +210,7 @@ def build_frame(
     step: int,
     final_step: int,
     view_id: int,
+    view_label: str | None,
     cell_width: int,
     cell_height: int,
 ) -> Image.Image:
@@ -203,7 +225,8 @@ def build_frame(
         "white",
     )
     draw = ImageDraw.Draw(canvas)
-    draw.text((10, 10), f"view {view_id:03d}     step {step:,}", fill="black")
+    display_view = view_label or f"view_{view_id:03d}"
+    draw.text((10, 10), f"{display_view}     step {step:,}", fill="black")
 
     first_run = next(iter(runs.values()))
     columns_data: list[tuple[str, Path | None, dict[str, float] | None]] = [
@@ -246,22 +269,14 @@ def build_frame(
     return canvas
 
 
-def draw_centered(
-    draw: ImageDraw.ImageDraw, text: str, x: int, y: int, width: int
-) -> None:
+def draw_centered(draw: ImageDraw.ImageDraw, text: str, x: int, y: int, width: int) -> None:
     bounds = draw.textbbox((0, 0), text)
     text_width = bounds[2] - bounds[0]
     draw.text((x + (width - text_width) / 2, y + 6), text, fill="black")
 
 
 def render_path(run: Path, step: int, view_id: int, kind: str) -> Path:
-    return (
-        run
-        / "benchmark"
-        / "renders"
-        / f"step_{step:06d}"
-        / f"view_{view_id:03d}_{kind}.png"
-    )
+    return run / "benchmark" / "renders" / f"step_{step:06d}" / f"view_{view_id:03d}_{kind}.png"
 
 
 def target_path(run: Path, step: int, view_id: int) -> Path:
@@ -278,9 +293,7 @@ def load_preview_metrics(run: Path, step: int, view_id: int) -> dict[str, float]
     try:
         payload: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
         summary = payload["summary"]
-        view = next(
-            item for item in payload["per_view"] if int(item["view"]) == view_id
-        )
+        view = next(item for item in payload["per_view"] if int(item["view"]) == view_id)
         return {
             "psnr": float(view["psnr"]),
             "ssim": float(view["ssim"]),

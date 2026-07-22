@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scene-data", default="colmap/scene.npz")
     parser.add_argument("--init", default="init/colmap_sparse_gaussians.pt")
     parser.add_argument("--output-dir", default="comparisons/colmap_sparse")
-    parser.add_argument("--compare-run", default="comparisons/log_ellipse")
+    parser.add_argument("--compare-run", default="comparisons/region_init")
     parser.add_argument("--report-dir", default="comparisons/colmap_report")
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--device", default="cuda")
@@ -201,7 +201,7 @@ def main() -> None:
                 sys.executable,
                 str(repository_root / "scripts" / "compare_gsplat_runs.py"),
                 "--run",
-                f"vggt_log_grid={comparison_run}",
+                f"region_init={comparison_run}",
                 "--run",
                 f"colmap_sparse={training_dir}",
                 "--output",

@@ -6,9 +6,9 @@ scene:
 
 training:
   init_path: init/fused_gaussians.pt
-  output_dir: comparisons/log_ellipse
-  model_path: comparisons/log_ellipse/final_gaussians.pt
-  eval_output_dir: comparisons/log_ellipse/eval
+  output_dir: comparisons/region_init
+  model_path: comparisons/region_init/final_gaussians.pt
+  eval_output_dir: comparisons/region_init/eval
   device: cuda
   seed: 42
   max_steps: 30000
